@@ -32,10 +32,17 @@ impl Drop for JsEngineCallbackGuard {
 /// Acquire JS_ENGINE lock for a hook callback.
 ///
 /// Same-thread reentrant callbacks短路返回（当前线程已持有引擎）。
-/// 其他线程无条件等锁 —— callback 必须执行，不走 skip/timeout fallback。
-/// 代价: 高并发 hook 线程串行化，吞吐降但行为正确（避免并发 ART 状态切换 /
-/// cleanup 窗口并发 JNI crash）。
-/// 成功时调用 qjs_update_stack_top 完成跨线程栈同步。
+/// 其他线程: try_lock 非阻塞尝试。拿不到立即返回 None → 调用方走 fallback
+/// (invoke_original_jni，不进 JS callback)。
+///
+/// 为什么不能用阻塞 lock:
+///   Rust Mutex::lock 在 POSIX futex 上阻塞，不参与 ART GC safepoint。
+///   当 JS_ENGINE 持有者执行 $orig → CallNonvirtual*MethodA → ART 需要 GC →
+///   GC STW 要求所有 mutator 到达 safepoint → 阻塞在 Rust Mutex 的线程
+///   无法响应 → GC 死等 → 持有者也在 GC 里等 → 死锁。
+///
+/// try_lock fallback 的代价: 高并发 hook 时部分调用跳过 JS callback 直接走原方法。
+/// 对 HashMap.put 类热点方法这是可接受的 — 不丢功能，只丢少量观测。
 pub(crate) unsafe fn acquire_js_engine_for_callback(
     ctx: *mut ffi::JSContext,
     _context_name: &str,
@@ -48,13 +55,10 @@ pub(crate) unsafe fn acquire_js_engine_for_callback(
         return Some(JsEngineCallbackGuard::Reentrant);
     }
 
-    // 无条件等锁，callback 必须跑完。不走 skip/fallback 路径以避免:
-    // 1. 并发触发 JNI ART 状态切换(GC safepoint 挂)
-    // 2. cleanup 期间 ArtMethod 字段被改 vs 旧 x1 受害者
-    // 代价: 高并发 hook 下所有线程被 JS 锁串行化 → 吞吐下降，但正确。
-    let g = match crate::JS_ENGINE.lock() {
+    let g = match crate::JS_ENGINE.try_lock() {
         Ok(g) => g,
-        Err(e) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
     };
     crate::mark_js_engine_owner_current_thread();
     ffi::qjs_update_stack_top(ctx);
@@ -346,11 +350,52 @@ pub(crate) unsafe fn dup_callback_to_bytes(ctx: *mut ffi::JSContext, callback: f
 ///   传 `|| {}` 跳过。
 ///
 /// 返回值: `true` 表示 JS 回调抛异常（handle_result 未被调用），`false` 表示正常执行。
+/// JS 执行期间 ART suspend 检查点。
+///
+/// QuickJS interrupt handler 周期性调用此函数。通过 ExceptionCheck JNI 调用
+/// 触发 kNative→kRunnable→kNative 转换，让 ART 处理 pending suspend/checkpoint 请求。
+/// 解决 JS_Call 长时间 kNative → SuspendThreadByPeer 超时 → SIGABRT。
+pub(crate) static ART_CHECKPOINT_ENV: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// QuickJS interrupt handler — 注册到 JS_SetInterruptHandler。
+/// QuickJS 每执行一定数量的操作码后调用一次（默认 ~255 条指令）。
+pub(crate) unsafe extern "C" fn art_interrupt_handler(
+    _rt: *mut ffi::JSRuntime,
+    _opaque: *mut std::ffi::c_void,
+) -> i32 {
+    let env = ART_CHECKPOINT_ENV.load(std::sync::atomic::Ordering::Acquire);
+    if env != 0 {
+        let env_ptr = env as *mut std::ffi::c_void;
+        let vtable = *(env_ptr as *const *const usize);
+        type ExcCheckFn = unsafe extern "C" fn(*mut std::ffi::c_void) -> u8;
+        let exc_check: ExcCheckFn = std::mem::transmute(*(vtable.add(228)));
+        exc_check(env_ptr);
+    }
+    0
+}
+
 pub(crate) unsafe fn invoke_hook_callback_common(
     ctx_raw: usize,
     callback_bytes: &[u8; 16],
     context_name: &str,
     target_id: u64,
+    build_context: impl FnOnce(*mut ffi::JSContext) -> ffi::JSValue,
+    handle_result: impl FnOnce(*mut ffi::JSContext, ffi::JSValue, ffi::JSValue),
+    on_js_exception: impl FnOnce(*mut ffi::JSContext, ffi::JSValue),
+) -> bool {
+    invoke_hook_callback_common_with_env(
+        ctx_raw, callback_bytes, context_name, target_id,
+        std::ptr::null_mut(), build_context, handle_result, on_js_exception,
+    )
+}
+
+pub(crate) unsafe fn invoke_hook_callback_common_with_env(
+    ctx_raw: usize,
+    callback_bytes: &[u8; 16],
+    context_name: &str,
+    target_id: u64,
+    jni_env: *mut std::ffi::c_void,
     build_context: impl FnOnce(*mut ffi::JSContext) -> ffi::JSValue,
     handle_result: impl FnOnce(*mut ffi::JSContext, ffi::JSValue, ffi::JSValue),
     on_js_exception: impl FnOnce(*mut ffi::JSContext, ffi::JSValue),
@@ -363,19 +408,21 @@ pub(crate) unsafe fn invoke_hook_callback_common(
         None => return false,
     };
 
-    // 从 bytes 提取 JS callback value，dup 增加引用计数。
-    // 回调执行期间 re-hook 可能替换并释放 registry 中的旧回调，
-    // dup 确保 JS_Call 期间函数不会被释放（防止 UAF）。
     let callback: ffi::JSValue = std::ptr::read(callback_bytes.as_ptr() as *const ffi::JSValue);
     let callback_dup = ffi::qjs_dup_value(ctx, callback);
 
-    // 构建 JS 上下文对象（hook 类型相关）
     let js_ctx = build_context(ctx);
+
+    // ART suspend 兼容: 设置 interrupt handler 的 JNIEnv（JS_Call 期间周期性
+    // 调用 ExceptionCheck 做 kNative→kRunnable→kNative 转换，处理 ART suspend 请求，
+    // 避免 SuspendThreadByPeer 超时 → SIGABRT）。
+    let prev_env = ART_CHECKPOINT_ENV.swap(jni_env as usize, std::sync::atomic::Ordering::Release);
 
     let global = ffi::JS_GetGlobalObject(ctx);
     let result = ffi::JS_Call(ctx, callback_dup, global, 1, &js_ctx as *const _ as *mut _);
 
-    // 异常检查 — 无异常时才处理返回值；有异常则在锁内调 fallback
+    ART_CHECKPOINT_ENV.store(prev_env, std::sync::atomic::Ordering::Release);
+
     let had_exception = handle_js_exception(ctx, result, context_name);
     if had_exception {
         on_js_exception(ctx, js_ctx);
@@ -383,7 +430,6 @@ pub(crate) unsafe fn invoke_hook_callback_common(
         handle_result(ctx, js_ctx, result);
     }
 
-    // 清理 JS 值（锁仍持有 + stack_top 仍有效）
     ffi::qjs_free_value(ctx, js_ctx);
     ffi::qjs_free_value(ctx, result);
     ffi::qjs_free_value(ctx, global);

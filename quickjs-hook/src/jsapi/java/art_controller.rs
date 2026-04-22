@@ -721,6 +721,23 @@ fn get_art_thread_spec_cached() -> Option<&'static ArtThreadSpec> {
     }
 }
 
+/// Callback gate: 只允许一个线程进入完整 JNI trampoline → callback 路径。
+/// 在 art_router_stack_check 中 CAS 获取，在 java_hook_callback 末尾（guard drop）释放。
+pub(crate) static JAVA_CALLBACK_GATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Gate 冷却计数器：释放后 N 次调用全部 bypass，避免主线程频繁走 $orig JNI 路径
+static GATE_COOLDOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static GATE_COOLDOWN_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(50);
+
+pub(crate) struct CallbackGateGuard;
+impl Drop for CallbackGateGuard {
+    fn drop(&mut self) {
+        GATE_COOLDOWN.store(GATE_COOLDOWN_CALLS.load(std::sync::atomic::Ordering::Relaxed), std::sync::atomic::Ordering::Release);
+        JAVA_CALLBACK_GATE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 pub(super) static DO_CALL_COUNT: AtomicU64 = AtomicU64::new(0);
 pub(super) static DO_CALL_HIT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// DoCall on_enter: 检查 x0 (ArtMethod*) 是否在 replacedMethods 中，有则替换。
@@ -883,6 +900,14 @@ pub(crate) fn clear_call_original_bypass() {
     unsafe { get_bypass_stack().pop(); }
 }
 
+pub(crate) fn get_interpreter_bridge() -> u64 {
+    use super::art_method::ART_BRIDGE_FUNCTIONS;
+    match ART_BRIDGE_FUNCTIONS.get() {
+        Some(b) => b.quick_to_interpreter_bridge,
+        None => 0,
+    }
+}
+
 /// C-callable：art_router thunk + DoCall hook 调用，判断是否应该路由。
 /// 返回 1 = 正常路由到 replacement，返回 0 = 跳过（callOriginal bypass 或 stack 递归 或 JS engine 繁忙）。
 #[no_mangle]
@@ -899,8 +924,24 @@ pub unsafe extern "C" fn art_router_stack_check(replacement: u64) -> i32 {
     // 比 try_lock + drop 更稳: 不需 acquire/release 锁, 无 race 窗口.
     let current_thread = crate::current_thread_id_u64();
     let owner = crate::JS_ENGINE_OWNER_THREAD.load(std::sync::atomic::Ordering::Acquire);
-    if owner != 0 && owner != current_thread {
-        return 0; // JS 被别人占用, 走 trampoline 原方法
+    if owner == current_thread {
+        // reentrant ($orig path)
+    } else if owner != 0 {
+        return 0; // JS 被别人占用
+    } else {
+        // 冷却期：gate 释放后 N 次调用全部 bypass，避免主线程频繁走 $orig JNI
+        if GATE_COOLDOWN.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            GATE_COOLDOWN.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            return 0;
+        }
+        // CAS gate: 只允许一个线程进入完整路径
+        if JAVA_CALLBACK_GATE.compare_exchange(
+            false, true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+        ).is_err() {
+            return 0;
+        }
     }
 
     // TLS bypass 栈: 检查栈中是否有任何一个 entry 匹配当前 replacement 的 original

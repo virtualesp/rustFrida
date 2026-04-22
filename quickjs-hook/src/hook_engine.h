@@ -350,6 +350,22 @@ void hook_art_router_table_clear(void);
  */
 uint64_t hook_art_router_table_lookup_original(uint64_t replacement);
 
+/* Fast $orig bypass — skip art_router prologue+scan when callOriginal is in progress.
+ * Array of per-thread slots checked at thunk entry BEFORE register save.
+ * Each slot: {thread_id, method(ArtMethod*), trampoline, pad} = 32 bytes. */
+#define ORIG_BYPASS_SLOTS 4
+
+typedef struct {
+    volatile uint64_t thread;       /* thread ID (TPIDR_EL0), 0 = free slot */
+    volatile uint64_t method;       /* original ArtMethod* to match x0 */
+    volatile uint64_t trampoline;   /* trampoline to jump to on match */
+    uint64_t _pad;
+} OrigBypassState;
+
+extern OrigBypassState g_orig_bypass[ORIG_BYPASS_SLOTS];
+extern volatile uint64_t g_orig_bypass_active;  /* >0 when any slot in use */
+extern volatile uint64_t g_orig_bypass_hit;     /* debug counter */
+
 /*
  * Dump all entries in the ART router lookup table (via hook_log).
  */

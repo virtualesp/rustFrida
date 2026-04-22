@@ -14,9 +14,9 @@ impl JSRuntime {
     pub fn new() -> Option<Self> {
         let ptr = unsafe { ffi::JS_NewRuntime() };
         NonNull::new(ptr).map(|ptr| {
-            // Set memory limit (64MB default)
             unsafe {
                 ffi::JS_SetMemoryLimit(ptr.as_ptr(), 64 * 1024 * 1024);
+                // interrupt handler + NewLocalRef 都去掉，回到纯 try_lock
             }
             JSRuntime { ptr }
         })

@@ -92,8 +92,10 @@ pub(super) unsafe extern "C" fn java_hook_callback(
     if ctx_ptr.is_null() || user_data.is_null() {
         return;
     }
+
     let _in_flight_guard = InFlightJavaHookGuard::enter();
     let _callback_scope = JavaHookCallbackScope::enter();
+    let _gate_guard = crate::jsapi::java::art_controller::CallbackGateGuard;
 
     // user_data is ArtMethod* address (used as registry key)
     let art_method_addr = user_data as u64;
@@ -112,11 +114,7 @@ pub(super) unsafe extern "C" fn java_hook_callback(
     ) = {
         let guard = match JAVA_HOOK_REGISTRY.lock() {
             Ok(g) => g,
-            Err(_) => {
-                // Lock poisoned during cleanup — zero x0 to prevent returning garbage
-                (*ctx_ptr).x[0] = 0;
-                return;
-            }
+            Err(e) => e.into_inner(),
         };
         let registry = match guard.as_ref() {
             Some(r) => r,
@@ -152,12 +150,12 @@ pub(super) unsafe extern "C" fn java_hook_callback(
     // Track whether handle_result was called (false if JS exception occurred)
     let result_was_set = std::cell::Cell::new(false);
 
-    let had_js_exception = invoke_hook_callback_common(
+    let had_js_exception = invoke_hook_callback_common_with_env(
         ctx_usize,
         &callback_bytes,
         "java hook",
         art_method_addr,
-        // 构建 JS 上下文对象：thisObj, args[], env, orig()
+        hook_ctx_env as *mut std::ffi::c_void,
         |ctx| {
             let js_ctx = ffi::JS_NewObject(ctx);
             let hook_ctx = &*ctx_ptr;
@@ -277,11 +275,33 @@ pub(super) unsafe extern "C" fn java_hook_callback(
         },
     );
 
-    // 兜底: 若 handle_result / on_js_exception 都未 set (engine busy skip 等边角)
+    // 兜底: JS engine busy (try_lock failed) 或其他原因导致 callback 未执行 →
+    // 调用原方法保持正确语义 (不能返回 0/null，HashMap.put 等需要正确返回值)
     let _ = had_js_exception;
+    // fallback: try_lock 失败 → 直接调原方法，不做 NewLocalRef
+    // (从 callback 入口到这里没有 GC 触发点，transition ref 仍然有效)
     if !result_was_set.get() {
-        (*ctx_ptr).x[0] = 0;
+        let env = hook_ctx_env;
+        if !env.is_null() {
+            let hook_ctx = &*ctx_ptr;
+            let jargs = build_jargs_from_registers(hook_ctx, param_count, &param_types);
+            let jargs_ptr = if param_count > 0 {
+                jargs.as_ptr() as *const std::ffi::c_void
+            } else {
+                std::ptr::null()
+            };
+            let ret = invoke_original_jni(
+                env, art_method_addr, class_global_ref,
+                hook_ctx.x[1], return_type, is_static, jargs_ptr, quick_trampoline,
+            );
+            if return_type != b'V' {
+                (*ctx_ptr).x[0] = ret;
+            }
+        } else {
+            (*ctx_ptr).x[0] = 0;
+        }
     }
+
 }
 
 /// 把 js_call_original 返回的 JSValue 还原为写 x[0] 的 u64。
@@ -402,6 +422,7 @@ pub unsafe extern "C" fn java_hook_dispatch_from_quick(
         return_type_sig,
         param_types,
         class_global_ref,
+        quick_trampoline,
     ) = {
         let guard = match JAVA_HOOK_REGISTRY.lock() {
             Ok(g) => g,
@@ -433,6 +454,7 @@ pub unsafe extern "C" fn java_hook_dispatch_from_quick(
             hook_data.return_type_sig.clone(),
             hook_data.param_types.clone(),
             hook_data.class_global_ref,
+            hook_data.quick_trampoline,
         )
     }; // lock released
 
@@ -542,6 +564,7 @@ pub unsafe extern "C" fn java_hook_dispatch_from_quick(
                 return_type,
                 true, // 强制 is_static
                 jargs_ptr,
+                quick_trampoline,
             );
             if return_type != b'V' {
                 (*ctx_ptr).x[0] = ret_raw;

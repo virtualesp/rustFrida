@@ -19,6 +19,11 @@ volatile uint64_t g_art_router_miss_count = 0;
 volatile uint64_t g_art_router_hit_count = 0;
 volatile uint64_t g_art_router_last_hit_x0 = 0;
 
+/* Fast $orig bypass state */
+OrigBypassState g_orig_bypass[ORIG_BYPASS_SLOTS] = {{0}};
+volatile uint64_t g_orig_bypass_active = 0;
+volatile uint64_t g_orig_bypass_hit = 0;
+
 /* ============================================================================
  * ART router table management
  * ============================================================================ */
@@ -167,6 +172,41 @@ void hook_art_router_get_hit_debug(uint64_t* hit_count, uint64_t* last_hit_x0) {
  * LR  is the second reg in STP x29,lr at GPR_OFF+128 → offset 152. */
 #define ROUTER_SAVED_X20_OFF (ROUTER_FRAME_GPR_OFF + 48 + 8)   /* 72 */
 #define ROUTER_SAVED_LR_OFF  (ROUTER_FRAME_GPR_OFF + 128 + 8)  /* 152 */
+
+/* TPIDR_EL0 system register encoding */
+#define SYSREG_TPIDR_EL0 0xDE82
+
+/* Fast $orig bypass: checked BEFORE prologue (zero register save overhead).
+ * Scans g_orig_bypass slots for matching thread+method, jumps to trampoline.
+ * Only clobbers X16/X17 (scratch registers). */
+static void emit_art_router_fast_bypass(Arm64Writer* w, uint64_t lbl_normal) {
+    /* Fast exit: if no bypass active, skip scan */
+    arm64_writer_put_ldr_reg_u64(w, ARM64_REG_X17, (uint64_t)&g_orig_bypass_active);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_X17, 0);
+    arm64_writer_put_cbz_reg_label(w, ARM64_REG_X17, lbl_normal);
+
+    /* X16 = current thread ID */
+    arm64_writer_put_mrs_reg(w, ARM64_REG_X16, SYSREG_TPIDR_EL0);
+
+    for (int i = 0; i < ORIG_BYPASS_SLOTS; i++) {
+        OrigBypassState* slot = &g_orig_bypass[i];
+        arm64_writer_put_ldr_reg_u64(w, ARM64_REG_X17, (uint64_t)&slot->thread);
+        arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_X17, 0);
+        arm64_writer_put_cmp_reg_reg(w, ARM64_REG_X16, ARM64_REG_X17);
+        uint64_t lbl_next = arm64_writer_new_label_id(w);
+        arm64_writer_put_b_cond_label(w, ARM64_COND_NE, lbl_next);
+        /* Thread matches — check method */
+        arm64_writer_put_ldr_reg_u64(w, ARM64_REG_X17, (uint64_t)&slot->method);
+        arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_X17, 0);
+        arm64_writer_put_cmp_reg_reg(w, ARM64_REG_X17, ARM64_REG_X0);
+        arm64_writer_put_b_cond_label(w, ARM64_COND_NE, lbl_next);
+        /* Match! Jump to trampoline */
+        arm64_writer_put_ldr_reg_u64(w, ARM64_REG_X17, (uint64_t)&slot->thread);
+        arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X16, ARM64_REG_X17, 16); /* trampoline */
+        arm64_writer_put_br_reg(w, ARM64_REG_X16);
+        arm64_writer_put_label(w, lbl_next);
+    }
+}
 
 static void emit_art_router_prologue(Arm64Writer* w) {
     /* thunk-level 计数废弃, 见 hook_engine_inline.c emit_save_hook_context 注释.
@@ -668,6 +708,11 @@ void* hook_create_art_router_stub(uint64_t fallback_target,
 
     Arm64Writer w;
     arm64_writer_init(&w, body_mem, (uint64_t)body_mem, body_alloc);
+
+    /* Fast $orig bypass */
+    uint64_t lbl_normal_path = arm64_writer_new_label_id(&w);
+    emit_art_router_fast_bypass(&w, lbl_normal_path);
+    arm64_writer_put_label(&w, lbl_normal_path);
 
     emit_art_router_prologue(&w);
 

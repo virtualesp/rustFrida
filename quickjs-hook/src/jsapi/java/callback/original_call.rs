@@ -379,7 +379,7 @@ unsafe fn autobox_primitive_to_jobject(
 ///
 /// 约束: JS 回调里如果 orig() 后再做 JNI 调用, CheckJNI 见 pending 会 abort;
 /// 用户需自己处理 (try/catch 或避免后续 JNI)。
-unsafe fn invoke_original_jni(
+pub(super) unsafe fn invoke_original_jni(
     env: JniEnv,
     art_method_addr: u64,
     class_global_ref: usize,
@@ -387,10 +387,10 @@ unsafe fn invoke_original_jni(
     return_type: u8,
     is_static: bool,
     jargs_ptr: *const std::ffi::c_void,
+    quick_trampoline: u64,
 ) -> u64 {
     jni_check_exc(env);
 
-    // TLS bypass: 告诉 art_router 当前线程在 callOriginal，不要路由这个方法
     crate::jsapi::java::art_controller::set_call_original_bypass(art_method_addr);
 
     let result = invoke_original_jni_inner(
@@ -520,7 +520,7 @@ unsafe fn invoke_original_jni_inner(
 }
 
 /// Build jvalue args from HookContext registers (ARM64 JNI calling convention).
-unsafe fn build_jargs_from_registers(
+pub(super) unsafe fn build_jargs_from_registers(
     hook_ctx: &hook_ffi::HookContext,
     param_count: usize,
     param_types: &[String],
@@ -577,6 +577,7 @@ unsafe extern "C" fn js_call_original(
         param_count,
         is_static,
         param_types,
+        quick_trampoline,
     ) = {
         let guard = match JAVA_HOOK_REGISTRY.lock() {
             Ok(g) => g,
@@ -607,6 +608,7 @@ unsafe extern "C" fn js_call_original(
             data.param_count,
             data.is_static,
             data.param_types.clone(),
+            data.quick_trampoline,
         )
     }; // lock released
 
@@ -626,41 +628,18 @@ unsafe extern "C" fn js_call_original(
         e
     };
 
-    // Build jvalue args: from user-specified JS args (if provided), or from registers.
-    let jargs = if _argc > 0 && !_argv.is_null() {
-        // User-specified arguments: convert JS values → jvalue
-        let mut args: Vec<u64> = Vec::with_capacity(param_count);
-        for i in 0..param_count {
-            let type_sig = param_types.get(i).map(|s| s.as_str());
-            if (i as i32) < _argc {
-                let js_arg = JSValue(*_argv.add(i));
-                args.push(marshal_js_to_jvalue(ctx, env, js_arg, type_sig));
-            } else {
-                // 不足的参数用原始寄存器值补齐
-                let mut gp = i;
-                let mut fp = i;
-                let (gp_val, fp_val) =
-                    extract_jni_arg(hook_ctx, is_floating_point_type(type_sig), &mut gp, &mut fp);
-                args.push(if is_floating_point_type(type_sig) {
-                    fp_val
-                } else {
-                    gp_val
-                });
-            }
-        }
-        args
-    } else {
-        // No arguments: use original register values
-        build_jargs_from_registers(hook_ctx, param_count, &param_types)
-    };
+    // 始终从 hook_ctx 寄存器读参数 (transition ref)。
+    // transition ref 指向 GenericJNI 帧 vreg CompressedReference，GC 会实时更新该值。
+    // 比从 JS __jptr 缓存读更安全（__jptr 和 transition ref 是同一个栈地址，
+    // 但绕过 marshal 避免潜在的 JS 对象生命周期问题）。
+    // TODO: 支持用户修改参数时需要 hybrid 策略
+    let jargs = build_jargs_from_registers(hook_ctx, param_count, &param_types);
     let jargs_ptr = if param_count > 0 {
         jargs.as_ptr() as *const std::ffi::c_void
     } else {
         std::ptr::null()
     };
 
-    // 恢复 JNI trampoline 后, x[1] 是标准 JNI jobject (由 ART 转换)
-    // 2-ArtMethod 模型: 直接用原始 ArtMethod 作为 method ID 调用
     let ret_raw = invoke_original_jni(
         env,
         art_method_addr,
@@ -669,12 +648,9 @@ unsafe extern "C" fn js_call_original(
         return_type,
         is_static,
         jargs_ptr,
+        quick_trampoline,
     );
 
-    // app 抛的 Java 异常保留在 JNIEnv pending — 返回到 Java 后自然传播。
-    // JS 层如果要感知异常, 需自己调 env 的 ExceptionCheck (未来可封装)。
-
-    // Convert raw return value to JS value
     match return_type {
         b'V' => ffi::qjs_undefined(),
         b'Z' => JSValue::bool(ret_raw != 0).raw(),

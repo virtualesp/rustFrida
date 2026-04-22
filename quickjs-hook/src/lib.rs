@@ -84,7 +84,11 @@ pub(crate) static JS_ENGINE_OWNER_THREAD: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 pub(crate) fn current_thread_id_u64() -> u64 {
-    unsafe { libc::pthread_self() as usize as u64 }
+    // Must use TPIDR_EL0 directly — on API 36, pthread_self() != TPIDR_EL0.
+    // The thunk bypass uses MRS TPIDR_EL0 for thread matching.
+    let tpidr: u64;
+    unsafe { std::arch::asm!("mrs {}, tpidr_el0", out(reg) tpidr) };
+    tpidr
 }
 
 #[inline]

@@ -133,6 +133,9 @@ fn main() {
         .allowlist_var("ARM64_.*")
         .allowlist_var("RECOMP_.*")
         .allowlist_var("g_thunk_in_flight")
+        .allowlist_var("g_orig_bypass")
+        .allowlist_var("g_orig_bypass_active")
+        .allowlist_type("OrigBypassState")
         .use_core()
         .generate()
         .expect("Unable to generate hook_engine bindings");
