@@ -282,10 +282,34 @@ pub(crate) fn load_script_file(session: &Session, script_path: &str, reset: bool
     }
 
     session.eval_state.clear();
-    let cmd = build_loadjs_cmd(&script, Some(script_path));
-    send_command(sender, cmd).map_err(|e| format!("发送 loadjs 失败: {}", e))?;
+    let is_lua = script_path.ends_with(".lua");
+    let cmd = if is_lua {
+        build_loadlua_cmd(&script, Some(script_path))
+    } else {
+        build_loadjs_cmd(&script, Some(script_path))
+    };
+    send_command(sender, cmd).map_err(|e| {
+        format!("发送 {} 失败: {}", if is_lua { "loadlua" } else { "loadjs" }, e)
+    })?;
     print_eval_result(session, 30);
     Ok(())
+}
+
+/// 构造 `loadlua` 命令字符串（带可选 filename 前缀）。
+fn build_loadlua_cmd(script: &str, script_path: Option<&str>) -> String {
+    if let Some(path) = script_path {
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("script.lua");
+        if name.contains('[') || name.contains(']') || name.contains('\n') {
+            format!("loadlua {}", script)
+        } else {
+            format!("loadlua [{}]\n{}", name, script)
+        }
+    } else {
+        format!("loadlua {}", script)
+    }
 }
 
 /// 打印 eval 响应：等待 session.eval_state 结果并格式化输出。

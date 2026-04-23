@@ -2,6 +2,7 @@ pub mod ffi;
 pub mod state;
 pub mod api;
 pub mod callback;
+pub mod script;
 
 use state::LuaState;
 use std::collections::HashMap;
@@ -10,6 +11,9 @@ use std::sync::Mutex;
 /// Lua 回调注册表：art_method -> (bytecode, metadata)
 pub(crate) struct LuaHookEntry {
     pub bytecode: Vec<u8>,
+    /// true = lua_dump 的裸函数字节码 (loadbuffer 后直接是 callback function)
+    /// false = "return function(ctx)...end" chunk (loadbuffer 后需 pcall 取返回值)
+    pub is_raw_bytecode: bool,
     pub is_static: bool,
     pub param_count: usize,
     pub param_types: Vec<String>,
@@ -105,13 +109,19 @@ pub(crate) unsafe fn ensure_hook_loaded(
     tls: &mut ThreadLuaState,
     art_method: u64,
     bytecode: &[u8],
+    is_raw_bytecode: bool,
 ) -> Result<i32, String> {
     if let Some(&ref_id) = tls.loaded_hooks.get(&art_method) {
         return Ok(ref_id);
     }
     let L = tls.state.as_ptr();
     tls.state.load_bytecode(bytecode, "<hook>")?;
-    tls.state.pcall(0, 1)?;
+    if is_raw_bytecode {
+        // lua_dump 的裸函数: loadbuffer 后栈顶直接是 callback function
+    } else {
+        // "return function(ctx)...end" chunk: pcall 取返回值
+        tls.state.pcall(0, 1)?;
+    }
     if !ffi::lua_isfunction_ex(L, -1) {
         ffi::lua_pop(L, 1);
         return Err("Lua hook chunk did not return a function".to_string());

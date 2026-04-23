@@ -13,93 +13,31 @@ use super::install_support::{
     install_per_method_router_hook, update_original_method_flags_for_hook, JavaHookInstallGuard,
 };
 
-/// Java.luaHook(class, method, sig, luaCode)
-///
-/// luaCode 是 Lua 函数体字符串，框架自动包装为:
-///   return function(ctx) <luaCode> end
-///
-/// ctx 是 Lua table:
-///   ctx.args — 参数数组 (1-indexed)
-///   ctx.thisObj — this 对象 (lightuserdata)
-///   ctx:orig() — 调用原始方法
-pub(in crate::jsapi::java) unsafe extern "C" fn js_lua_hook(
-    ctx: *mut ffi::JSContext,
-    _this: ffi::JSValue,
-    argc: i32,
-    argv: *mut ffi::JSValue,
-) -> ffi::JSValue {
-    if argc < 4 {
-        return ffi::JS_ThrowTypeError(
-            ctx,
-            b"Java.luaHook() requires 4 args: class, method, signature, luaCode\0".as_ptr()
-                as *const _,
-        );
-    }
-
-    let class_name = match extract_string_arg(
-        ctx, JSValue(*argv),
-        b"Java.luaHook() arg1 must be class name\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-
-    let method_name = match extract_string_arg(
-        ctx, JSValue(*argv.add(1)),
-        b"Java.luaHook() arg2 must be method name\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-
-    let sig_str = match extract_string_arg(
-        ctx, JSValue(*argv.add(2)),
-        b"Java.luaHook() arg3 must be signature\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-
-    let lua_code = match extract_string_arg(
-        ctx, JSValue(*argv.add(3)),
-        b"Java.luaHook() arg4 must be lua code string\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-
-    let (actual_sig, force_static) = if let Some(stripped) = sig_str.strip_prefix("static:") {
+/// 核心安装逻辑 — Lua hook (从 JS 或 Lua 调用)
+pub(crate) unsafe fn install_lua_hook_inner(
+    class_name: &str,
+    method_name: &str,
+    sig: &str,
+    bytecode: Vec<u8>,
+    is_raw_bytecode: bool,
+) -> Result<(), String> {
+    let (actual_sig, force_static) = if let Some(stripped) = sig.strip_prefix("static:") {
         (stripped.to_string(), true)
     } else {
-        (sig_str.clone(), false)
+        (sig.to_string(), false)
     };
 
-    // 编译 Lua callback
-    let lua_source = format!("return function(ctx)\n{}\nend", lua_code);
-    let bytecode = match crate::lua::compile_lua_callback(&lua_source) {
-        Ok(bc) => bc,
-        Err(e) => return throw_internal_error(ctx, format!("Lua compile error: {}", e)),
-    };
-
-    let env = match ensure_jni_initialized() {
-        Ok(e) => e,
-        Err(msg) => return throw_internal_error(ctx, msg),
-    };
+    let env = ensure_jni_initialized()?;
 
     let (art_method, is_static) =
-        match resolve_art_method(env, &class_name, &method_name, &actual_sig, force_static) {
-            Ok(r) => r,
-            Err(msg) => return throw_internal_error(ctx, msg),
-        };
+        resolve_art_method(env, class_name, method_name, &actual_sig, force_static)?;
 
-    // 检查是否已经 hook (JS 或 Lua)
     init_java_registry();
     crate::lua::init_lua_registry();
 
     if crate::lua::is_lua_hook(art_method) {
-        // 替换已有 Lua callback
         crate::lua::register_lua_hook(art_method, crate::lua::LuaHookEntry {
-            bytecode,
+            bytecode, is_raw_bytecode,
             is_static,
             param_count: count_jni_params(&actual_sig),
             param_types: parse_jni_param_types(&actual_sig),
@@ -113,16 +51,15 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_lua_hook(
             "[lua hook] callback 已替换: {}.{}{}",
             class_name, method_name, actual_sig
         ));
-        return JSValue::bool(true).raw();
+        return Ok(());
     }
 
-    // 已有 JS hook → 不允许覆盖 (需先 unhook)
     if crate::jsapi::callback_util::with_registry(&JAVA_HOOK_REGISTRY, |r| {
         r.contains_key(&art_method)
     })
     .unwrap_or(false)
     {
-        return throw_internal_error(ctx, "method already hooked via JS — unhook first");
+        return Err("method already hooked via JS — unhook first".to_string());
     }
 
     let spec = get_art_method_spec(env, art_method);
@@ -136,48 +73,31 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_lua_hook(
     let bridge = find_art_bridge_functions(env, ep_offset);
     let jni_trampoline = bridge.quick_generic_jni_trampoline;
     if jni_trampoline == 0 {
-        return throw_internal_error(ctx, "art_quick_generic_jni_trampoline not found");
+        return Err("art_quick_generic_jni_trampoline not found".to_string());
     }
 
-    let class_global_ref = match create_class_global_ref(env, &class_name) {
-        Ok(gref) => gref,
-        Err(msg) => return throw_internal_error(ctx, msg),
-    };
-
+    let class_global_ref = create_class_global_ref(env, class_name)?;
     let clone_size = spec.size;
     let mut install_guard = JavaHookInstallGuard::new(
-        art_method,
-        spec.access_flags_offset,
-        data_off,
-        ep_offset,
-        original_access_flags,
-        original_data,
-        original_entry_point,
-        class_global_ref,
+        art_method, spec.access_flags_offset, data_off, ep_offset,
+        original_access_flags, original_data, original_entry_point, class_global_ref,
     );
 
     let return_type = get_return_type_from_sig(&actual_sig);
     let has_independent_code = !is_art_quick_entrypoint(original_entry_point, bridge);
 
-    // 共用同一个 native trampoline — java_hook_callback 内部检测 is_lua_hook 并 dispatch
     let thunk = hook_ffi::hook_create_native_trampoline(
-        art_method,
-        Some(java_hook_callback),
-        art_method as *mut std::ffi::c_void,
-        0,
+        art_method, Some(java_hook_callback), art_method as *mut std::ffi::c_void, 0,
     );
     if thunk.is_null() {
-        return throw_internal_error(ctx, "hook_create_native_trampoline failed");
+        return Err("hook_create_native_trampoline failed".to_string());
     }
     install_guard.set_redirect_installed();
 
-    let replacement_addr = match create_replacement_art_method(
-        art_method, clone_size, spec, original_access_flags, data_off, ep_offset, thunk,
-        jni_trampoline,
-    ) {
-        Ok(addr) => addr,
-        Err(msg) => return throw_internal_error(ctx, msg),
-    };
+    let replacement_addr = create_replacement_art_method(
+        art_method, clone_size, spec, original_access_flags, data_off, ep_offset,
+        thunk, jni_trampoline,
+    )?;
     install_guard.set_replacement_addr(replacement_addr);
 
     ensure_art_controller_initialized(&bridge, ep_offset, env as *mut std::ffi::c_void);
@@ -199,66 +119,81 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_lua_hook(
     }
 
     let (_per_method_hook_target, quick_trampoline, _use_blr) =
-        match install_per_method_router_hook(
+        install_per_method_router_hook(
             has_independent_code, original_entry_point, &bridge, ep_offset, env,
             art_method, method_name == "<init>",
-        ) {
-            Ok(v) => v,
-            Err(msg) => return throw_internal_error(ctx, msg),
-        };
+        )?;
 
-    // 注册到 Lua hook registry
     let bytecode_len = bytecode.len();
     crate::lua::register_lua_hook(art_method, crate::lua::LuaHookEntry {
-        bytecode,
-        is_static,
+        bytecode, is_raw_bytecode, is_static,
         param_count: count_jni_params(&actual_sig),
         param_types: parse_jni_param_types(&actual_sig),
         return_type,
         return_type_sig: get_return_type_sig(&actual_sig),
-        class_global_ref,
-        quick_trampoline,
-        art_method,
+        class_global_ref, quick_trampoline, art_method,
     });
 
-    // 同时在 JAVA_HOOK_REGISTRY 注册 (unhook/cleanup 依赖)
     let dummy_bytes = [0u8; 16];
     with_registry_mut(&JAVA_HOOK_REGISTRY, |registry| {
-        registry.insert(
-            art_method,
-            JavaHookData {
-                art_method,
-                original_access_flags,
-                original_entry_point,
-                original_data,
-                hook_type: HookType::Replaced {
-                    replacement_addr,
-                    per_method_hook_target: _per_method_hook_target,
-                },
-                clone_addr: 0,
-                class_global_ref,
-                return_type,
-                return_type_sig: get_return_type_sig(&actual_sig),
-                ctx: 0,
-                callback_bytes: dummy_bytes,
-                method_key: method_key(&class_name, &method_name, &actual_sig),
-                is_static,
-                param_count: count_jni_params(&actual_sig),
-                param_types: parse_jni_param_types(&actual_sig),
-                class_name: class_name.clone(),
-                quick_trampoline,
-                use_blr: false,
-            },
-        );
+        registry.insert(art_method, JavaHookData {
+            art_method, original_access_flags, original_entry_point, original_data,
+            hook_type: HookType::Replaced { replacement_addr, per_method_hook_target: _per_method_hook_target },
+            clone_addr: 0, class_global_ref, return_type,
+            return_type_sig: get_return_type_sig(&actual_sig),
+            ctx: 0, callback_bytes: dummy_bytes,
+            method_key: method_key(class_name, method_name, &actual_sig),
+            is_static, param_count: count_jni_params(&actual_sig),
+            param_types: parse_jni_param_types(&actual_sig),
+            class_name: class_name.to_string(), quick_trampoline, use_blr: false,
+        });
     });
 
-    cache_fields_for_class(env, &class_name);
-
+    cache_fields_for_class(env, class_name);
     output_verbose(&format!(
         "[lua hook] 安装完成: {}.{}{} (ArtMethod={:#x}, bytecode={}B)",
         class_name, method_name, actual_sig, art_method, bytecode_len
     ));
 
     install_guard.commit();
-    JSValue::bool(true).raw()
+    Ok(())
+}
+
+/// JS API: Java.luaHook(class, method, sig, luaCode)
+pub(in crate::jsapi::java) unsafe extern "C" fn js_lua_hook(
+    ctx: *mut ffi::JSContext,
+    _this: ffi::JSValue,
+    argc: i32,
+    argv: *mut ffi::JSValue,
+) -> ffi::JSValue {
+    if argc < 4 {
+        return ffi::JS_ThrowTypeError(
+            ctx,
+            b"Java.luaHook() requires 4 args: class, method, signature, luaCode\0".as_ptr() as *const _,
+        );
+    }
+
+    let class_name = match extract_string_arg(ctx, JSValue(*argv), b"arg1 must be class name\0") {
+        Ok(v) => v, Err(e) => return e,
+    };
+    let method_name = match extract_string_arg(ctx, JSValue(*argv.add(1)), b"arg2 must be method name\0") {
+        Ok(v) => v, Err(e) => return e,
+    };
+    let sig_str = match extract_string_arg(ctx, JSValue(*argv.add(2)), b"arg3 must be signature\0") {
+        Ok(v) => v, Err(e) => return e,
+    };
+    let lua_code = match extract_string_arg(ctx, JSValue(*argv.add(3)), b"arg4 must be lua code\0") {
+        Ok(v) => v, Err(e) => return e,
+    };
+
+    let lua_source = format!("return function(ctx)\n{}\nend", lua_code);
+    let bytecode = match crate::lua::compile_lua_callback(&lua_source) {
+        Ok(bc) => bc,
+        Err(e) => return throw_internal_error(ctx, format!("Lua compile error: {}", e)),
+    };
+
+    match install_lua_hook_inner(&class_name, &method_name, &sig_str, bytecode, false) {
+        Ok(()) => JSValue::bool(true).raw(),
+        Err(e) => throw_internal_error(ctx, e),
+    }
 }

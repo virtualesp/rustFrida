@@ -55,6 +55,7 @@ pub use runtime::JSRuntime;
 pub use value::JSValue;
 
 pub use lua::compile_lua_callback;
+pub use lua::script::load_lua_script;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};

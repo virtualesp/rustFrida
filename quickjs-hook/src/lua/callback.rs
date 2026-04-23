@@ -35,6 +35,7 @@ pub unsafe extern "C" fn lua_hook_callback(
     let entry_data = match super::with_lua_hook(art_method_addr, |e| {
         (
             e.bytecode.clone(),
+            e.is_raw_bytecode,
             e.is_static,
             e.param_count,
             e.param_types.clone(),
@@ -52,6 +53,7 @@ pub unsafe extern "C" fn lua_hook_callback(
 
     let (
         bytecode,
+        is_raw_bytecode,
         is_static,
         param_count,
         param_types,
@@ -77,7 +79,7 @@ pub unsafe extern "C" fn lua_hook_callback(
         }
     };
 
-    let func_ref = match super::ensure_hook_loaded(tls, art_method_addr, &bytecode) {
+    let func_ref = match super::ensure_hook_loaded(tls, art_method_addr, &bytecode, is_raw_bytecode) {
         Ok(r) => r,
         Err(e) => {
             crate::jsapi::console::output_message(&format!(

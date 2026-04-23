@@ -328,6 +328,31 @@ fn process_cmd(command: &str) {
             eval_and_respond(script, filename, b"[quickjs] Error: empty script");
         }
         #[cfg(feature = "quickjs")]
+        Some("loadlua") => {
+            let rest = command
+                .strip_prefix("loadlua ")
+                .or_else(|| command.strip_prefix("loadlua\n"))
+                .or_else(|| command.strip_prefix("loadlua"))
+                .unwrap_or("");
+            let (filename, script) = parse_loadjs_payload(rest);
+            if script.is_empty() {
+                send_eval_err("[lua] empty script");
+            } else {
+                // 确保 JS 引擎已初始化 (Lua hook 安装依赖 JNI)
+                if !quickjs_loader::is_initialized() {
+                    if let Err(e) = quickjs_loader::init() {
+                        send_eval_err(&format!("[lua] jsinit failed: {}", e));
+                        return;
+                    }
+                }
+                let fname = if filename.is_empty() { "<eval.lua>" } else { filename };
+                match quickjs_hook::load_lua_script(script, fname) {
+                    Ok(result) => send_eval_ok(&result),
+                    Err(e) => send_eval_err(&format!("[lua] {}", e)),
+                }
+            }
+        }
+        #[cfg(feature = "quickjs")]
         Some("jseval") => {
             // jseval 是 REPL 单行表达式，不支持 filename 前缀
             let expr = command

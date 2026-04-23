@@ -38,7 +38,7 @@ mod heap_scan;
 mod java_array_api;
 mod java_choose_api;
 mod java_field_api;
-mod java_hook_api;
+pub(crate) mod java_hook_api;
 mod java_inspect_api;
 mod java_method_list_api;
 pub(crate) mod jni_core;
