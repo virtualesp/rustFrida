@@ -60,7 +60,7 @@ fn find_module_path_and_base(module_name: &str) -> Option<(String, u64)> {
 }
 
 /// Parse /proc/self/maps to find a module's base address.
-fn find_module_base(module_name: &str) -> u64 {
+pub(crate) fn find_module_base(module_name: &str) -> u64 {
     {
         let guard = module_cache()
             .read()
@@ -76,11 +76,11 @@ fn find_module_base(module_name: &str) -> u64 {
 
 /// Module info from /proc/self/maps
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ModuleInfo {
-    name: String,
-    base: u64,
-    size: u64,
-    path: String,
+pub(crate) struct ModuleInfo {
+    pub name: String,
+    pub base: u64,
+    pub size: u64,
+    pub path: String,
 }
 
 impl ModuleInfo {
@@ -331,7 +331,7 @@ fn aggregate_modules(entries: &[ModuleMapEntry]) -> Vec<ModuleInfo> {
 }
 
 /// Parse /proc/self/maps and aggregate VMAs per unique path.
-fn enumerate_modules_from_maps() -> Vec<ModuleInfo> {
+pub(crate) fn enumerate_modules_from_maps() -> Vec<ModuleInfo> {
     refresh_module_snapshot_cache().modules
 }
 
