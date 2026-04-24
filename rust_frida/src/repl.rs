@@ -239,11 +239,9 @@ impl Helper for JsReplCompleter {}
 ///
 /// 返回 `Ok(())` 仅表示脚本已送达并收到响应（响应内容由 `print_eval_result` 打印）。
 pub(crate) fn load_script_file(session: &Session, script_path: &str, reset: bool) -> Result<(), String> {
-    let sender = session
-        .get_sender()
-        .ok_or_else(|| "agent 未连接".to_string())?;
-    let script = std::fs::read_to_string(script_path)
-        .map_err(|e| format!("读取脚本文件 '{}' 失败: {}", script_path, e))?;
+    let sender = session.get_sender().ok_or_else(|| "agent 未连接".to_string())?;
+    let script =
+        std::fs::read_to_string(script_path).map_err(|e| format!("读取脚本文件 '{}' 失败: {}", script_path, e))?;
 
     if reset {
         log_info!("重载脚本: {}", script_path);
@@ -252,10 +250,7 @@ pub(crate) fn load_script_file(session: &Session, script_path: &str, reset: bool
         // drain 超时时 agent 返回 Err，中止 reload 避免 UAF 旧 callback。
         session.eval_state.clear();
         if send_command(sender, "jsclean_soft").is_ok() {
-            match session
-                .eval_state
-                .recv_timeout(std::time::Duration::from_secs(35))
-            {
+            match session.eval_state.recv_timeout(std::time::Duration::from_secs(35)) {
                 None => return Err("等待 jsclean_soft 超时".to_string()),
                 Some(Err(ref e)) if e.contains("未初始化") => {}
                 Some(Err(e)) if e.contains("drain timeout") => {
@@ -271,10 +266,7 @@ pub(crate) fn load_script_file(session: &Session, script_path: &str, reset: bool
 
     session.eval_state.clear();
     send_command(sender, "jsinit").map_err(|e| format!("发送 jsinit 失败: {}", e))?;
-    match session
-        .eval_state
-        .recv_timeout(std::time::Duration::from_secs(10))
-    {
+    match session.eval_state.recv_timeout(std::time::Duration::from_secs(10)) {
         None => return Err("等待引擎初始化超时".to_string()),
         Some(Err(ref e)) if e.contains("已初始化") => {}
         Some(Err(e)) => return Err(format!("引擎初始化失败: {}", e)),
@@ -376,9 +368,11 @@ pub(crate) fn run_js_repl(session: &Arc<Session>) {
     // Auto-initialize JS engine: send jsinit and wait for EVAL confirmation.
     // Accept both Ok (just initialized) and Err containing "已初始化" (already was ready).
     {
-        let result = session.eval_state.clear_then_recv(std::time::Duration::from_secs(5), || {
-            let _ = send_command(sender, "jsinit");
-        });
+        let result = session
+            .eval_state
+            .clear_then_recv(std::time::Duration::from_secs(5), || {
+                let _ = send_command(sender, "jsinit");
+            });
         match result {
             None => {
                 log_error!("jsrepl: jsinit 超时，JS 引擎未就绪");

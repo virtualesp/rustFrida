@@ -82,69 +82,6 @@ native_call_shim:
     ret
 .size native_call_shim, .-native_call_shim
 
-/*
- * ART quick-code call shim.
- *
- * ART AArch64 quick code expects x19 to hold art::Thread*. Normal C/Rust code
- * does not preserve that invariant while running inside the callback runtime,
- * so arbitrary quick calls need a dedicated shim that restores x19 for the
- * duration of the managed call.
- *
- * Signature:
- *   uint64_t art_quick_call_shim(
- *       void *fn, void *thread, const uint64_t *gpr, const double *fpr,
- *       const uint64_t *stk, size_t stk_count)
- */
-.global art_quick_call_shim
-.type art_quick_call_shim, @function
-.align 4
-art_quick_call_shim:
-    stp     x29, x30, [sp, #-16]!
-    mov     x29, sp
-    stp     x19, x20, [sp, #-16]!
-
-    /* Stash fn and set ART Thread register. */
-    mov     x8, x0
-    mov     x19, x1
-
-    /* Load FPRs from fpr array (x3). */
-    ldp     d0, d1, [x3, #0]
-    ldp     d2, d3, [x3, #16]
-    ldp     d4, d5, [x3, #32]
-    ldp     d6, d7, [x3, #48]
-
-    /* Spill overflow args from x4/x5. */
-    cbz     x5, 4f
-    lsl     x9, x5, #3
-    add     x9, x9, #15
-    and     x9, x9, #~15
-    sub     sp, sp, x9
-
-    mov     x10, #0
-3:
-    ldr     x11, [x4, x10, lsl #3]
-    str     x11, [sp, x10, lsl #3]
-    add     x10, x10, #1
-    cmp     x10, x5
-    b.lt    3b
-
-4:
-    /* Load managed call x0-x7 from gpr array (x2). */
-    mov     x12, x2
-    ldp     x6, x7, [x12, #48]
-    ldp     x4, x5, [x12, #32]
-    ldp     x2, x3, [x12, #16]
-    ldp     x0, x1, [x12, #0]
-
-    blr     x8
-
-    mov     sp, x29
-    sub     sp, sp, #16
-    ldp     x19, x20, [sp], #16
-    ldp     x29, x30, [sp], #16
-    ret
-.size art_quick_call_shim, .-art_quick_call_shim
-
 /* GNU-stack note: mark stack non-executable (prevents W^X warnings). */
 #if defined(__linux__) || defined(__ANDROID__)
 .section .note.GNU-stack,"",%progbits

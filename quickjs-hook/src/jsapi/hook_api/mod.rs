@@ -110,7 +110,9 @@ pub fn cut_native_hooks() {
     let guard = HOOK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(registry) = guard.as_ref() {
         for (addr, data) in registry.iter() {
-            unsafe { remove_single_hook(*addr, data); }
+            unsafe {
+                remove_single_hook(*addr, data);
+            }
         }
     }
 }
@@ -121,7 +123,9 @@ pub fn free_native_hooks() {
     let mut guard = HOOK_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(registry) = guard.take() {
         for (_addr, data) in registry {
-            unsafe { free_hook_callback(&data); }
+            unsafe {
+                free_hook_callback(&data);
+            }
         }
     }
 }

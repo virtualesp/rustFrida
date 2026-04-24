@@ -1,7 +1,7 @@
-pub mod ffi;
-pub mod state;
 pub mod api;
 pub mod callback;
+pub mod ffi;
+pub mod state;
 
 use state::LuaState;
 use std::collections::HashMap;
@@ -46,17 +46,10 @@ pub(crate) struct LuaCallbackGuard;
 impl LuaCallbackGuard {
     pub(crate) fn enter() -> Self {
         LUA_CALLBACK_TOTAL.fetch_add(1, Ordering::Relaxed);
-        let active = LUA_CALLBACK_ACTIVE
-            .fetch_add(1, Ordering::AcqRel)
-            .wrapping_add(1);
+        let active = LUA_CALLBACK_ACTIVE.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         let mut observed = LUA_CALLBACK_MAX_ACTIVE.load(Ordering::Acquire);
         while active > observed {
-            match LUA_CALLBACK_MAX_ACTIVE.compare_exchange(
-                observed,
-                active,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match LUA_CALLBACK_MAX_ACTIVE.compare_exchange(observed, active, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => break,
                 Err(v) => observed = v,
             }
@@ -122,7 +115,9 @@ fn update_hook_set(reg: &Option<HashMap<u64, LuaHookEntry>>) {
         let old_usize = old as usize;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            unsafe { drop(Box::from_raw(old_usize as *mut Vec<u64>)); }
+            unsafe {
+                drop(Box::from_raw(old_usize as *mut Vec<u64>));
+            }
         });
     }
 }
@@ -235,10 +230,7 @@ pub(crate) unsafe fn get_thread_lua_state() -> Option<&'static mut ThreadLuaStat
 }
 
 /// 获取 per-thread 缓存的 hook 数据。首次访问时从全局注册表拷贝+编译，之后零锁。
-pub(crate) unsafe fn get_cached_hook(
-    tls: &mut ThreadLuaState,
-    art_method: u64,
-) -> Option<&CachedHook> {
+pub(crate) unsafe fn get_cached_hook(tls: &mut ThreadLuaState, art_method: u64) -> Option<&CachedHook> {
     if tls.cached_hooks.contains_key(&art_method) {
         return tls.cached_hooks.get(&art_method);
     }
@@ -259,9 +251,19 @@ pub(crate) unsafe fn get_cached_hook(
         )
     })?;
 
-    let (bytecode, is_raw_bytecode, is_static, param_count, param_types,
-         return_type, return_type_sig, class_global_ref, quick_trampoline, use_blr,
-         quick_orig_precall) = entry_data;
+    let (
+        bytecode,
+        is_raw_bytecode,
+        is_static,
+        param_count,
+        param_types,
+        return_type,
+        return_type_sig,
+        class_global_ref,
+        quick_trampoline,
+        use_blr,
+        quick_orig_precall,
+    ) = entry_data;
 
     let L = tls.state.as_ptr();
     if tls.state.load_bytecode(&bytecode, "<hook>").is_err() {
@@ -278,11 +280,21 @@ pub(crate) unsafe fn get_cached_hook(
     }
     let func_ref = ffi::luaL_ref(L, ffi::LUA_REGISTRYINDEX);
 
-    tls.cached_hooks.insert(art_method, CachedHook {
-        func_ref, is_static, param_count, param_types,
-        return_type, return_type_sig, class_global_ref, quick_trampoline, use_blr,
-        quick_orig_precall,
-    });
+    tls.cached_hooks.insert(
+        art_method,
+        CachedHook {
+            func_ref,
+            is_static,
+            param_count,
+            param_types,
+            return_type,
+            return_type_sig,
+            class_global_ref,
+            quick_trampoline,
+            use_blr,
+            quick_orig_precall,
+        },
+    );
     tls.cached_hooks.get(&art_method)
 }
 
@@ -302,7 +314,9 @@ pub(crate) fn cleanup_lua() {
         let old_usize = old as usize;
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            unsafe { drop(Box::from_raw(old_usize as *mut Vec<u64>)); }
+            unsafe {
+                drop(Box::from_raw(old_usize as *mut Vec<u64>));
+            }
         });
     }
 }

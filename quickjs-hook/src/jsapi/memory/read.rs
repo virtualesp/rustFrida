@@ -18,10 +18,12 @@ macro_rules! define_memory_read {
         ) -> ffi::JSValue {
             let (addr, _rem_argv, _rem_argc) = match get_addr_this_or_arg($ctx_id, this, argc, argv) {
                 Some(v) => v,
-                None => return ffi::JS_ThrowTypeError(
-                    $ctx_id,
-                    concat!($js_name, "() requires a pointer\0").as_ptr() as *const _,
-                ),
+                None => {
+                    return ffi::JS_ThrowTypeError(
+                        $ctx_id,
+                        concat!($js_name, "() requires a pointer\0").as_ptr() as *const _,
+                    )
+                }
             };
             if !is_addr_accessible(addr, $size) {
                 return ffi::JS_ThrowRangeError($ctx_id, b"Invalid memory address\0".as_ptr() as *const _);

@@ -53,10 +53,12 @@ macro_rules! define_memory_write {
         ) -> ffi::JSValue {
             let (addr, rem_argv, rem_argc) = match get_addr_this_or_arg($ctx_id, this, argc, argv) {
                 Some(v) => v,
-                None => return ffi::JS_ThrowTypeError(
-                    $ctx_id,
-                    concat!($js_name, "() requires a pointer\0").as_ptr() as *const _,
-                ),
+                None => {
+                    return ffi::JS_ThrowTypeError(
+                        $ctx_id,
+                        concat!($js_name, "() requires a pointer\0").as_ptr() as *const _,
+                    )
+                }
             };
             if rem_argc < 1 {
                 return ffi::JS_ThrowTypeError(
@@ -74,7 +76,11 @@ macro_rules! define_memory_write {
             }) {
                 return ffi::JS_ThrowRangeError(
                     $ctx_id,
-                    concat!($js_name, "(): target page is not writable; call Memory.protect(addr, size, \"rwx\") first\0").as_ptr() as *const _,
+                    concat!(
+                        $js_name,
+                        "(): target page is not writable; call Memory.protect(addr, size, \"rwx\") first\0"
+                    )
+                    .as_ptr() as *const _,
                 );
             }
             JSValue::undefined().raw()
@@ -119,17 +125,11 @@ pub(super) unsafe extern "C" fn memory_write_bytes(
     let (addr, rem_argv, rem_argc) = match get_addr_this_or_arg(ctx, this, argc, argv) {
         Some(v) => v,
         None => {
-            return ffi::JS_ThrowTypeError(
-                ctx,
-                b"writeBytes() requires a pointer\0".as_ptr() as *const _,
-            );
+            return ffi::JS_ThrowTypeError(ctx, b"writeBytes() requires a pointer\0".as_ptr() as *const _);
         }
     };
     if rem_argc < 1 {
-        return ffi::JS_ThrowTypeError(
-            ctx,
-            b"writeBytes() requires bytes argument\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowTypeError(ctx, b"writeBytes() requires bytes argument\0".as_ptr() as *const _);
     }
 
     let bytes = match extract_bytes(ctx, JSValue(*rem_argv)) {
@@ -149,10 +149,7 @@ pub(super) unsafe extern "C" fn memory_write_bytes(
     match stealth {
         0 => {
             if !is_addr_accessible(addr, bytes.len()) {
-                return ffi::JS_ThrowRangeError(
-                    ctx,
-                    b"writeBytes: invalid memory address\0".as_ptr() as *const _,
-                );
+                return ffi::JS_ThrowRangeError(ctx, b"writeBytes: invalid memory address\0".as_ptr() as *const _);
             }
             let src = bytes.as_ptr();
             let len = bytes.len();
@@ -190,9 +187,7 @@ pub(super) unsafe extern "C" fn memory_write_bytes(
                     second_len,
                 );
                 if rc2 != 0 {
-                    let msg = format!(
-                        "writeBytes(stealth=1): wxshadow_patch second-page rc={}\0", rc2
-                    );
+                    let msg = format!("writeBytes(stealth=1): wxshadow_patch second-page rc={}\0", rc2);
                     return ffi::JS_ThrowInternalError(ctx, b"%s\0".as_ptr() as *const _, msg.as_ptr());
                 }
                 let rc1 = ffi::hook::wxshadow_patch(
@@ -202,9 +197,7 @@ pub(super) unsafe extern "C" fn memory_write_bytes(
                 );
                 if rc1 != 0 {
                     ffi::hook::wxshadow_release(second_addr as *mut std::ffi::c_void);
-                    let msg = format!(
-                        "writeBytes(stealth=1): first-page rc={}, second 已回滚\0", rc1
-                    );
+                    let msg = format!("writeBytes(stealth=1): first-page rc={}, second 已回滚\0", rc1);
                     return ffi::JS_ThrowInternalError(ctx, b"%s\0".as_ptr() as *const _, msg.as_ptr());
                 }
                 ffi::hook::hook_flush_cache(addr as *mut _, len);
@@ -218,11 +211,7 @@ pub(super) unsafe extern "C" fn memory_write_bytes(
                 );
                 if rc != 0 {
                     let msg = format!("writeBytes(stealth=1): wxshadow_patch rc={}\0", rc);
-                    return ffi::JS_ThrowInternalError(
-                        ctx,
-                        b"%s\0".as_ptr() as *const _,
-                        msg.as_ptr(),
-                    );
+                    return ffi::JS_ThrowInternalError(ctx, b"%s\0".as_ptr() as *const _, msg.as_ptr());
                 }
                 ffi::hook::hook_flush_cache(addr as *mut _, len);
                 track_wxshadow_addr(addr);

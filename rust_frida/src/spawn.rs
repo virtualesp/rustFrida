@@ -515,8 +515,11 @@ fn find_zygote_pids() -> Result<Vec<(u32, String)>, String> {
                 if let Ok(status) = fs::read_to_string(&status_path) {
                     let uid_line = status.lines().find(|l| l.starts_with("Uid:"));
                     if let Some(line) = uid_line {
-                        let uid: u32 = line.split_whitespace().nth(1)
-                            .and_then(|s| s.parse().ok()).unwrap_or(u32::MAX);
+                        let uid: u32 = line
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(u32::MAX);
                         if uid != 0 {
                             log_verbose!("跳过 App Zygote {} (pid={}, uid={})", proc_name, pid, uid);
                             continue;
@@ -1032,11 +1035,9 @@ fn inject_zymbiote(pid: u32, socket_name: &str) -> Result<ZygotePatch, String> {
     } else {
         // 降级模式：要求 setcontext GOT 必须可用
         if !matches!(&setcontext_info, Some((_, Some(_)))) {
-            return Err(
-                "boot heap / RW private / 全读映射均未命中 setArgV0 指针，\
+            return Err("boot heap / RW private / 全读映射均未命中 setArgV0 指针，\
                  且 setcontext GOT 不可用 — 无法建立阻塞点，目标 Android 版本可能不兼容。"
-                    .to_string(),
-            );
+                .to_string());
         }
         log_warn!("降级为 setcontext-only 阻塞（Android 版本兼容路径）");
         let flag_offset = ctx_base_in_payload + CTX_BLOCK_IN_SETCONTEXT - CTX_SOCKET_PATH;
@@ -1076,14 +1077,13 @@ fn inject_zymbiote(pid: u32, socket_name: &str) -> Result<ZygotePatch, String> {
     let mem = ProcMem::open(pid)?;
 
     // 写入前边界检查：对齐、VMA 覆盖、邻接 VMA 不重叠
-    let write_end = loc
-        .base
-        .checked_add(payload_data.len() as u64)
-        .ok_or_else(|| format!(
+    let write_end = loc.base.checked_add(payload_data.len() as u64).ok_or_else(|| {
+        format!(
             "payload 写入范围溢出 u64: base=0x{:x} len={}",
             loc.base,
             payload_data.len()
-        ))?;
+        )
+    })?;
     if (loc.base & (page_size as u64 - 1)) != 0 {
         return Err(format!(
             "payload base 非页对齐: 0x{:x} page_size=0x{:x}{}",
@@ -1333,7 +1333,11 @@ fn dump_maps_near(maps: &[MapEntry], addr: u64, radius: usize) -> String {
     let hi = (center + radius + 1).min(maps.len());
     let mut out = String::new();
     for e in &maps[lo..hi] {
-        let marker = if addr >= e.start && addr < e.end { " <== HIT" } else { "" };
+        let marker = if addr >= e.start && addr < e.end {
+            " <== HIT"
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "\n    0x{:x}-0x{:x} {} off=0x{:x} {}{}",
             e.start, e.end, e.perms, e.offset, e.path, marker
@@ -1709,7 +1713,11 @@ fn build_payload(
     let replacement_setcontext_addr = payload_base + replacement_setcontext_offset;
     let replacement_prctl_addr = payload_base + replacement_prctl_offset;
     let ctx_base = zymbiote_offset as usize;
-    log_verbose!("ZymbioteContext: ctx_base=0x{:x}, payload_len=0x{:x}", ctx_base, payload.len());
+    log_verbose!(
+        "ZymbioteContext: ctx_base=0x{:x}, payload_len=0x{:x}",
+        ctx_base,
+        payload.len()
+    );
 
     // 填充 ZymbioteContext
     // socket_path
@@ -1745,8 +1753,16 @@ fn build_payload(
     write_u64(ctx, CTX_CLOSE - CTX_SOCKET_PATH, libc_funcs.close);
     write_u64(ctx, CTX_RAISE - CTX_SOCKET_PATH, libc_funcs.raise);
     // prop_remap: 有 profile 时启用
-    let prop_remap = if PROP_PROFILE_DIR.get().and_then(|v| v.as_ref()).is_some() { 1u64 } else { 0u64 };
-    log_verbose!("build_payload: prop_remap={} (PROP_PROFILE_DIR={:?})", prop_remap, PROP_PROFILE_DIR.get());
+    let prop_remap = if PROP_PROFILE_DIR.get().and_then(|v| v.as_ref()).is_some() {
+        1u64
+    } else {
+        0u64
+    };
+    log_verbose!(
+        "build_payload: prop_remap={} (PROP_PROFILE_DIR={:?})",
+        prop_remap,
+        PROP_PROFILE_DIR.get()
+    );
     write_u64(ctx, CTX_PROP_REMAP - CTX_SOCKET_PATH, prop_remap);
     // block_in_setcontext 默认 0，由调用者在三层 slot 全部 miss 时 flip 为 1
     write_u64(ctx, CTX_BLOCK_IN_SETCONTEXT - CTX_SOCKET_PATH, 0);

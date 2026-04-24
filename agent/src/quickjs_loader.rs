@@ -9,10 +9,9 @@ use crate::vma_name::set_anon_vma_name_raw;
 use libc::{munmap, sysconf, MAP_FAILED, _SC_PAGESIZE};
 
 use quickjs_hook::{
-    cleanup_engine, cleanup_wxshadow_patches, complete_script,
-    cut_art_controller_routing_hooks, cut_art_controller_walkstack_guards, cut_java_hooks,
-    cut_native_hooks, drain_thunk_in_flight, free_art_controller_state, free_java_hooks,
-    free_native_hooks, get_or_init_engine, init_hook_engine, load_script,
+    cleanup_engine, cleanup_wxshadow_patches, complete_script, cut_art_controller_routing_hooks,
+    cut_art_controller_walkstack_guards, cut_java_hooks, cut_native_hooks, drain_thunk_in_flight,
+    free_art_controller_state, free_java_hooks, free_native_hooks, get_or_init_engine, init_hook_engine, load_script,
     load_script_with_filename, set_console_callback, set_qbdi_helper_blob, set_qbdi_output_dir,
 };
 #[cfg(feature = "qbdi")]
@@ -117,7 +116,9 @@ pub fn init() -> Result<(), String> {
     // 注册 recomp handlers
     quickjs_hook::recomp::set_handler(|addr| crate::recompiler::ensure_and_translate(addr));
     quickjs_hook::recomp::set_alloc_slot_handler(|addr| crate::recompiler::alloc_trampoline_slot(addr));
-    quickjs_hook::recomp::set_fixup_handler(|trampoline, addr| crate::recompiler::fixup_slot_trampoline(trampoline, addr));
+    quickjs_hook::recomp::set_fixup_handler(|trampoline, addr| {
+        crate::recompiler::fixup_slot_trampoline(trampoline, addr)
+    });
     quickjs_hook::recomp::set_commit_handler(|addr| crate::recompiler::commit_slot_patch(addr));
     quickjs_hook::recomp::set_revert_handler(|addr| crate::recompiler::revert_slot_patch(addr));
     quickjs_hook::recomp::set_install_patch_handler(|addr, bytes| crate::recompiler::install_patch(addr, bytes));
@@ -264,8 +265,7 @@ pub fn cleanup() {
     stage("phase4 cleanup_wxshadow_patches", &mut t);
     crate::recompiler::release_all();
     stage("phase4 release_all_recomp", &mut t);
-    let (recomp_ok, recomp_fail, recomp_bytes) =
-        unsafe { crate::recompiler::munmap_retained_ranges() };
+    let (recomp_ok, recomp_fail, recomp_bytes) = unsafe { crate::recompiler::munmap_retained_ranges() };
     if recomp_ok + recomp_fail > 0 {
         log_msg(format!(
             "[quickjs] munmap recomp: ok={} fail={} bytes={}\n",
@@ -355,4 +355,3 @@ pub fn cleanup_soft() -> Result<(), String> {
     ));
     Ok(())
 }
-

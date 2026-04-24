@@ -318,7 +318,8 @@ unsafe extern "C" fn js_jni_find_class(
     };
 
     let name = match extract_string_arg(
-        ctx, JSValue(*argv.add(name_idx)),
+        ctx,
+        JSValue(*argv.add(name_idx)),
         b"Jni._findClass: name must be a string\0",
     ) {
         Ok(v) => v,
@@ -362,7 +363,8 @@ unsafe extern "C" fn js_jni_new_string_utf(
     };
 
     let s = match extract_string_arg(
-        ctx, JSValue(*argv.add(str_idx)),
+        ctx,
+        JSValue(*argv.add(str_idx)),
         b"Jni._newStringUtf: str must be a string\0",
     ) {
         Ok(v) => v,

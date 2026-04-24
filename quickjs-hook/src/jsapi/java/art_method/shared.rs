@@ -36,6 +36,7 @@ fn compute_classlinker_candidates(java_vm_off: usize) -> Vec<usize> {
 pub(super) struct ArtFieldSpec {
     pub size: usize,
     pub access_flags_offset: usize,
+    pub offset_offset: usize,
 }
 
 #[allow(dead_code)]
@@ -55,11 +56,13 @@ pub(super) fn get_art_field_spec() -> Option<&'static ArtFieldSpec> {
                 Some(ArtFieldSpec {
                     size: 16,
                     access_flags_offset: 4,
+                    offset_offset: 12,
                 })
             } else if api_level >= 21 {
                 Some(ArtFieldSpec {
                     size: 24,
                     access_flags_offset: 12,
+                    offset_offset: 20,
                 })
             } else {
                 None

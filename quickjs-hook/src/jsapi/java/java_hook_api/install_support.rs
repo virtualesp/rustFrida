@@ -188,8 +188,8 @@ pub(super) unsafe fn create_quick_stack_sentinel_art_method(
 ) -> Result<usize, String> {
     const K_ACC_STATIC: u32 = 0x0008;
 
-    let sentinel_src = get_known_native_art_method(env)
-        .ok_or("failed to resolve Process.getElapsedCpuTime sentinel ArtMethod")?;
+    let sentinel_src =
+        get_known_native_art_method(env).ok_or("failed to resolve Process.getElapsedCpuTime sentinel ArtMethod")?;
     if (sentinel_src & 0x3) != 0 {
         return Err(format!(
             "Process.getElapsedCpuTime sentinel ArtMethod is still tagged/opaque: {:#x}",
@@ -205,8 +205,7 @@ pub(super) unsafe fn create_quick_stack_sentinel_art_method(
     let repl = ptr as usize;
     let src_declaring_class = std::ptr::read_volatile(sentinel_src as *const u32);
     let src_dex_method_index = std::ptr::read_volatile((sentinel_src as usize + 12) as *const u32);
-    let src_flags =
-        std::ptr::read_volatile((sentinel_src as usize + spec.access_flags_offset) as *const u32);
+    let src_flags = std::ptr::read_volatile((sentinel_src as usize + spec.access_flags_offset) as *const u32);
     if src_declaring_class == 0 || src_declaring_class == 1 {
         libc::free(ptr);
         return Err(format!(
@@ -221,8 +220,7 @@ pub(super) unsafe fn create_quick_stack_sentinel_art_method(
             sentinel_src, src_flags
         ));
     }
-    let repl_flags = (src_flags
-        & !(K_ACC_CRITICAL_NATIVE | K_ACC_FAST_NATIVE | K_ACC_NTERP_ENTRY_POINT_FAST_PATH))
+    let repl_flags = (src_flags & !(K_ACC_CRITICAL_NATIVE | K_ACC_FAST_NATIVE | K_ACC_NTERP_ENTRY_POINT_FAST_PATH))
         | K_ACC_NATIVE
         | K_ACC_STATIC
         | k_acc_compile_dont_bother();
@@ -310,8 +308,7 @@ pub(super) unsafe fn install_per_method_router_hook(
             original_entry_point
         };
         let router_thunk_body =
-            hook_ffi::hook_art_router_get_thunk_body(actual_hook_target as *mut std::ffi::c_void)
-                as u64;
+            hook_ffi::hook_art_router_get_thunk_body(actual_hook_target as *mut std::ffi::c_void) as u64;
         let router_thunk_body = (router_thunk_body != 0).then_some(router_thunk_body);
 
         // 诊断: 验证 inline hook 的 patch 是否真正写入
@@ -324,7 +321,12 @@ pub(super) unsafe fn install_per_method_router_hook(
             hooked_bytes[0], hooked_bytes[1], hooked_bytes[2], hooked_bytes[3]
         ));
 
-        Ok((Some(actual_hook_target), trampoline as u64, enable_fast_orig, router_thunk_body))
+        Ok((
+            Some(actual_hook_target),
+            trampoline as u64,
+            enable_fast_orig,
+            router_thunk_body,
+        ))
     } else {
         // 非 compiled 方法: entry_point 是共享 stub (nterp/interpreter_bridge/resolution)
         // 如果 entry_point 不是 Layer 1 已 hook 的 interpreter_bridge/resolution_trampoline,

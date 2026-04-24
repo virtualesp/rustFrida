@@ -592,8 +592,9 @@ static void emit_art_router_quick_callback_path(Arm64Writer* w, uint64_t lbl_qui
     arm64_writer_put_br_reg(w, ARM64_REG_X16);
 
     arm64_writer_put_label(w, lbl_preorig_callback);
-    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X23, ARM64_REG_X20, 24); /* quick_callback */
-    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X24, ARM64_REG_X20, 32); /* quick_user_data */
+    /* ART quick code is not a C callee for our router. Do not keep router
+     * state in x20-x28 across the original quick call. */
+    arm64_writer_put_str_reg_reg_offset(w, ARM64_REG_X20, ARM64_REG_SP, ROUTER_FRAME_PADDING_OFF);
 
     /* Keep SP+0 as the quick stack sentinel while the original runs.
      * The sentinel is a static native no-object-argument ArtMethod clone whose
@@ -613,11 +614,12 @@ static void emit_art_router_quick_callback_path(Arm64Writer* w, uint64_t lbl_qui
     arm64_writer_put_mov_reg_reg(w, ARM64_REG_X22, ARM64_REG_X0);
 
     uint64_t lbl_preorig_no_callback = arm64_writer_new_label_id(w);
-    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X16, ARM64_REG_X23);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X20, ARM64_REG_SP, ROUTER_FRAME_PADDING_OFF);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X16, ARM64_REG_X20, 24); /* quick_callback */
     arm64_writer_put_cbz_reg_label(w, ARM64_REG_X16, lbl_preorig_no_callback);
     emit_art_router_inc_counter(w, &g_art_router_quick_callback_count);
     arm64_writer_put_mov_reg_reg(w, ARM64_REG_X0, ARM64_REG_X22);
-    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X1, ARM64_REG_X24);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X1, ARM64_REG_X20, 32); /* quick_user_data */
     arm64_writer_put_blr_reg(w, ARM64_REG_X16);
     arm64_writer_put_b_label(w, lbl_return_replacement);
 

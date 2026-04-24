@@ -400,8 +400,11 @@ unsafe fn write_field_value_dispatch(
 ) {
     match jni_sig.as_bytes().first().copied() {
         Some(b'Z') => {
-            let v = if value.is_bool() { value.to_bool().unwrap_or(false) as u8 }
-                    else { value.to_i64(ctx).map(|n| (n != 0) as u8).unwrap_or(0) };
+            let v = if value.is_bool() {
+                value.to_bool().unwrap_or(false) as u8
+            } else {
+                value.to_i64(ctx).map(|n| (n != 0) as u8).unwrap_or(0)
+            };
             if is_static {
                 type F = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, u8);
                 let f: F = jni_fn!(env, F, JNI_SET_STATIC_BOOLEAN_FIELD);
@@ -427,7 +430,9 @@ unsafe fn write_field_value_dispatch(
         Some(b'C') => {
             let v = if let Some(s) = value.to_string(ctx) {
                 s.chars().next().map(|c| c as u16).unwrap_or(0)
-            } else { value.to_i64(ctx).unwrap_or(0) as u16 };
+            } else {
+                value.to_i64(ctx).unwrap_or(0) as u16
+            };
             if is_static {
                 type F = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, u16);
                 let f: F = jni_fn!(env, F, JNI_SET_STATIC_CHAR_FIELD);
@@ -502,11 +507,13 @@ unsafe fn write_field_value_dispatch(
             use super::callback::marshal_js_to_jvalue;
             let jval = marshal_js_to_jvalue(ctx, env, value, Some(jni_sig));
             if is_static {
-                type F = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void);
+                type F =
+                    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void);
                 let f: F = jni_fn!(env, F, JNI_SET_STATIC_OBJECT_FIELD);
                 f(env, target, field_id, jval as *mut std::ffi::c_void);
             } else {
-                type F = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void);
+                type F =
+                    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, *mut std::ffi::c_void, *mut std::ffi::c_void);
                 let f: F = jni_fn!(env, F, JNI_SET_OBJECT_FIELD);
                 f(env, target, field_id, jval as *mut std::ffi::c_void);
             }
@@ -653,9 +660,7 @@ pub(super) unsafe extern "C" fn js_java_field_meta(
                         if !is_class_cached(rt_cls) {
                             cache_fields_for_class(env, rt_cls);
                         }
-                        if let Some((sig, field_id, is_static, _)) =
-                            lookup_field_in_cache(rt_cls, &field_name)
-                        {
+                        if let Some((sig, field_id, is_static, _)) = lookup_field_in_cache(rt_cls, &field_name) {
                             delete_local_ref(env, local_obj);
                             return make_field_meta_obj(ctx, field_id, &sig, is_static, rt_cls);
                         }

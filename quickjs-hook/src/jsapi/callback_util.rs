@@ -134,8 +134,19 @@ pub(crate) unsafe fn free_hot_atoms(ctx: *mut ffi::JSContext) {
         };
     }
     free_field!(
-        sp, pc, lr, return_address, trampoline, hook_ctx_ptr, hook_trampoline,
-        this_obj, env, hook_art_method, args, orig_jobject, jptr,
+        sp,
+        pc,
+        lr,
+        return_address,
+        trampoline,
+        hook_ctx_ptr,
+        hook_trampoline,
+        this_obj,
+        env,
+        hook_art_method,
+        args,
+        orig_jobject,
+        jptr,
     );
 }
 
@@ -458,11 +469,7 @@ pub(crate) unsafe fn get_js_u64_property(ctx: *mut ffi::JSContext, obj: ffi::JSV
 
 /// Atom 版 u64 属性读取：绕开 CString / atom 临时分配。
 #[inline]
-pub(crate) unsafe fn get_js_u64_property_atom(
-    ctx: *mut ffi::JSContext,
-    obj: ffi::JSValue,
-    atom: ffi::JSAtom,
-) -> u64 {
+pub(crate) unsafe fn get_js_u64_property_atom(ctx: *mut ffi::JSContext, obj: ffi::JSValue, atom: ffi::JSAtom) -> u64 {
     let prop = ffi::qjs_get_property(ctx, obj, atom);
     let jv = JSValue(prop);
     let value = jv.to_u64(ctx).unwrap_or(0);
@@ -529,15 +536,11 @@ pub(crate) unsafe fn dup_callback_to_bytes(ctx: *mut ffi::JSContext, callback: f
 /// QuickJS interrupt handler 周期性调用此函数。通过 ExceptionCheck JNI 调用
 /// 触发 kNative→kRunnable→kNative 转换，让 ART 处理 pending suspend/checkpoint 请求。
 /// 解决 JS_Call 长时间 kNative → SuspendThreadByPeer 超时 → SIGABRT。
-pub(crate) static ART_CHECKPOINT_ENV: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+pub(crate) static ART_CHECKPOINT_ENV: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// QuickJS interrupt handler — 注册到 JS_SetInterruptHandler。
 /// QuickJS 每执行一定数量的操作码后调用一次（默认 ~255 条指令）。
-pub(crate) unsafe extern "C" fn art_interrupt_handler(
-    _rt: *mut ffi::JSRuntime,
-    _opaque: *mut std::ffi::c_void,
-) -> i32 {
+pub(crate) unsafe extern "C" fn art_interrupt_handler(_rt: *mut ffi::JSRuntime, _opaque: *mut std::ffi::c_void) -> i32 {
     let env = ART_CHECKPOINT_ENV.load(std::sync::atomic::Ordering::Acquire);
     if env != 0 {
         let env_ptr = env as *mut std::ffi::c_void;
@@ -559,8 +562,14 @@ pub(crate) unsafe fn invoke_hook_callback_common(
     on_js_exception: impl FnOnce(*mut ffi::JSContext, ffi::JSValue),
 ) -> bool {
     invoke_hook_callback_common_with_env(
-        ctx_raw, callback_bytes, context_name, target_id,
-        std::ptr::null_mut(), build_context, handle_result, on_js_exception,
+        ctx_raw,
+        callback_bytes,
+        context_name,
+        target_id,
+        std::ptr::null_mut(),
+        build_context,
+        handle_result,
+        on_js_exception,
     )
 }
 

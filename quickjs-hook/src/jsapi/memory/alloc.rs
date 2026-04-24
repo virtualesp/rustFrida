@@ -15,8 +15,8 @@
 use crate::ffi;
 use crate::jsapi::ptr::create_native_pointer;
 use crate::value::JSValue;
-use std::sync::Mutex;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// 追踪由 Memory.alloc* 创建的指针，到 GC 时 free
 /// key: addr, value: layout size
@@ -49,10 +49,7 @@ pub(super) unsafe extern "C" fn memory_alloc(
     argv: *mut ffi::JSValue,
 ) -> ffi::JSValue {
     if argc < 1 {
-        return ffi::JS_ThrowTypeError(
-            ctx,
-            b"Memory.alloc() requires 1 argument: size\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowTypeError(ctx, b"Memory.alloc() requires 1 argument: size\0".as_ptr() as *const _);
     }
     let size_arg = JSValue(*argv);
     let size = match size_arg.to_i64(ctx) {
@@ -65,18 +62,12 @@ pub(super) unsafe extern "C" fn memory_alloc(
         }
     };
     if size > 256 * 1024 * 1024 {
-        return ffi::JS_ThrowRangeError(
-            ctx,
-            b"Memory.alloc() size too large (max 256MB)\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowRangeError(ctx, b"Memory.alloc() size too large (max 256MB)\0".as_ptr() as *const _);
     }
 
     let mem = libc::calloc(1, size);
     if mem.is_null() {
-        return ffi::JS_ThrowInternalError(
-            ctx,
-            b"Memory.alloc() out of memory\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowInternalError(ctx, b"Memory.alloc() out of memory\0".as_ptr() as *const _);
     }
     let addr = mem as u64;
     register_owned_alloc(addr, size);
@@ -161,10 +152,7 @@ pub(super) unsafe extern "C" fn memory_protect(
 
     if libc::mprotect(page_start as *mut libc::c_void, page_len, prot) != 0 {
         let err = std::io::Error::last_os_error();
-        let msg = format!(
-            "Memory.protect({:#x}, {}, \"{}\"): {}\0",
-            addr, size, prot_str, err
-        );
+        let msg = format!("Memory.protect({:#x}, {}, \"{}\"): {}\0", addr, size, prot_str, err);
         return ffi::JS_ThrowRangeError(ctx, msg.as_ptr() as *const _);
     }
     JSValue::bool(true).raw()
@@ -233,10 +221,7 @@ pub(super) unsafe extern "C" fn memory_alloc_utf8_string(
     let total = bytes.len() + 1; // + null terminator
     let mem = libc::malloc(total);
     if mem.is_null() {
-        return ffi::JS_ThrowInternalError(
-            ctx,
-            b"Memory.allocUtf8String() out of memory\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowInternalError(ctx, b"Memory.allocUtf8String() out of memory\0".as_ptr() as *const _);
     }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), mem as *mut u8, bytes.len());
     *(mem as *mut u8).add(bytes.len()) = 0;

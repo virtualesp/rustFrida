@@ -1462,7 +1462,11 @@ pub(crate) unsafe fn enumerate_methods_declared_only(env: JniEnv, class_name: &s
     enumerate_methods_inner(env, class_name, true)
 }
 
-unsafe fn enumerate_methods_inner(env: JniEnv, class_name: &str, declared_only: bool) -> Result<Vec<MethodInfo>, String> {
+unsafe fn enumerate_methods_inner(
+    env: JniEnv,
+    class_name: &str,
+    declared_only: bool,
+) -> Result<Vec<MethodInfo>, String> {
     use std::ffi::CStr;
     use std::ptr;
 

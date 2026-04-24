@@ -1,8 +1,8 @@
 use super::ffi as lua_ffi;
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::java::callback::{
-    build_jargs_from_registers, extract_jni_arg, is_floating_point_type,
-    invoke_original_jni, InFlightJavaHookGuard, JavaHookCallbackScope,
+    build_jargs_from_registers, extract_jni_arg, invoke_original_jni, is_floating_point_type, InFlightJavaHookGuard,
+    JavaHookCallbackScope,
 };
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -130,7 +130,9 @@ struct QuickDiagGuard {
 
 impl QuickDiagGuard {
     fn enter(method: u64) -> Self {
-        Self { slot: quick_diag_enter(method) }
+        Self {
+            slot: quick_diag_enter(method),
+        }
     }
 
     fn stage(&self, stage: u64) {
@@ -262,9 +264,7 @@ std::thread_local! {
     static CURRENT_QUICK_TRANSITION: RefCell<Option<CurrentQuickTransition>> = const { RefCell::new(None) };
 }
 
-pub(crate) unsafe fn with_current_quick_runnable<R>(
-    f: impl FnOnce(*mut std::ffi::c_void) -> R,
-) -> Option<R> {
+pub(crate) unsafe fn with_current_quick_runnable<R>(f: impl FnOnce(*mut std::ffi::c_void) -> R) -> Option<R> {
     let current = CURRENT_QUICK_TRANSITION.with(|c| *c.borrow());
     let current = current?;
     current.bridge.end(current.thread, current.diag_slot);
@@ -301,8 +301,8 @@ impl ArtNativeTransition {
 
         let bridge = if let Some(bridge) = *ART_JNI_TRANSITION.get_or_init(resolve_art_jni_transition) {
             bridge
-        } else if let Some(bridge) = *ART_QUICK_JNI_TRANSITION
-            .get_or_init(|| unsafe { resolve_quick_entrypoint_transition(thread as u64) })
+        } else if let Some(bridge) =
+            *ART_QUICK_JNI_TRANSITION.get_or_init(|| unsafe { resolve_quick_entrypoint_transition(thread as u64) })
         {
             bridge
         } else {
@@ -317,9 +317,19 @@ impl ArtNativeTransition {
 
         bridge.start(thread);
         super::record_native_transition_enter();
-        let current = CurrentQuickTransition { thread, bridge, diag_slot };
+        let current = CurrentQuickTransition {
+            thread,
+            bridge,
+            diag_slot,
+        };
         let previous_transition = CURRENT_QUICK_TRANSITION.with(|c| c.replace(Some(current)));
-        Some(Self { thread, bridge, diag_slot, managed_stack_top, previous_transition })
+        Some(Self {
+            thread,
+            bridge,
+            diag_slot,
+            managed_stack_top,
+            previous_transition,
+        })
     }
 }
 
@@ -347,10 +357,7 @@ struct ManagedStackTopGuard {
 }
 
 impl ManagedStackTopGuard {
-    unsafe fn publish(
-        thread: *mut std::ffi::c_void,
-        ctx_ptr: *mut hook_ffi::HookContext,
-    ) -> Option<Self> {
+    unsafe fn publish(thread: *mut std::ffi::c_void, ctx_ptr: *mut hook_ffi::HookContext) -> Option<Self> {
         if thread.is_null() || ctx_ptr.is_null() {
             return None;
         }
@@ -543,10 +550,7 @@ unsafe fn call_quick_jni_transition(entry: ArtQuickTransitionFn, _thread: *mut s
 }
 
 /// Lua callback 入口 — 全程无 Mutex，per-thread 缓存 + safepoint
-pub unsafe extern "C" fn lua_hook_callback(
-    ctx_ptr: *mut hook_ffi::HookContext,
-    user_data: *mut std::ffi::c_void,
-) {
+pub unsafe extern "C" fn lua_hook_callback(ctx_ptr: *mut hook_ffi::HookContext, user_data: *mut std::ffi::c_void) {
     if ctx_ptr.is_null() || user_data.is_null() {
         return;
     }
@@ -597,6 +601,7 @@ pub unsafe extern "C" fn lua_hook_callback(
     // orig() 已改为调用瞬间从 HookContext 重建原始参数，避免依赖这里缓存的引用。
     let use_local_refs = false;
     let mut local_refs: Vec<*mut std::ffi::c_void> = Vec::new();
+    super::api::set_current_local_refs(&mut local_refs);
     let this_obj = if use_local_refs && !is_static && hook_ctx.x[1] != 0 {
         new_jni_local_ref(env, hook_ctx.x[1], &mut local_refs) as u64
     } else {
@@ -607,23 +612,26 @@ pub unsafe extern "C" fn lua_hook_callback(
 
     lua_ffi::lua_rawgeti(L, lua_ffi::LUA_REGISTRYINDEX, func_ref as lua_ffi::lua_Integer);
 
-    let jargs = build_local_jargs_from_registers(
-        hook_ctx,
-        param_count,
-        &param_types,
-        env,
-        &mut local_refs,
-    );
+    let jargs = build_local_jargs_from_registers(hook_ctx, param_count, &param_types, env, &mut local_refs);
     let jargs_ptr: *const std::ffi::c_void = if param_count > 0 {
         jargs.as_ptr() as *const std::ffi::c_void
     } else {
         std::ptr::null()
     };
     let cb_ctx = CallbackContext {
-        env, hook_ctx_ptr: ctx_ptr, art_method: art_method_addr, class_global_ref,
-        this_obj, return_type, return_type_sig,
-        is_static, param_count, param_types: param_types.clone(),
-        jargs_ptr, quick_trampoline, use_blr,
+        env,
+        hook_ctx_ptr: ctx_ptr,
+        art_method: art_method_addr,
+        class_global_ref,
+        this_obj,
+        return_type,
+        return_type_sig,
+        is_static,
+        param_count,
+        param_types: param_types.clone(),
+        jargs_ptr,
+        quick_trampoline,
+        use_blr,
     };
 
     lua_ffi::lua_createtable(L, 0, 2);
@@ -684,8 +692,15 @@ pub unsafe extern "C" fn lua_hook_callback(
         super::api::clear_current_env();
         delete_local_refs(env, local_refs);
         fallback_call_original(
-            ctx_ptr, env, art_method_addr, class_global_ref,
-            param_count, &param_types, return_type, is_static, quick_trampoline,
+            ctx_ptr,
+            env,
+            art_method_addr,
+            class_global_ref,
+            param_count,
+            &param_types,
+            return_type,
+            is_static,
+            quick_trampoline,
         );
         return;
     }
@@ -753,6 +768,7 @@ pub unsafe extern "C" fn lua_hook_dispatch_from_quick(
     let param_types = cached.param_types.clone();
     (*ctx_ptr).intercept_leave = if quick_orig_precall { 1 } else { 0 };
     let mut local_refs: Vec<*mut std::ffi::c_void> = Vec::new();
+    super::api::set_current_local_refs(&mut local_refs);
     let quick_orig_ctx = QuickOrigContext {
         hook_ctx_ptr: ctx_ptr,
         art_method: art_method_addr,
@@ -877,10 +893,7 @@ pub unsafe extern "C" fn lua_hook_dispatch_from_quick(
 /// quick path, arguments are not in registers yet; ART copies them from caller
 /// vregs into the callee frame inside DoCallCommon. We mirror that decode here
 /// and keep the attach hook in tail-jump mode so the original DoCall still runs.
-pub unsafe fn lua_hook_dispatch_from_do_call(
-    ctx_ptr: *mut hook_ffi::HookContext,
-    is_range: bool,
-) {
+pub unsafe fn lua_hook_dispatch_from_do_call(ctx_ptr: *mut hook_ffi::HookContext, is_range: bool) {
     if ctx_ptr.is_null() {
         return;
     }
@@ -1006,10 +1019,7 @@ unsafe extern "C" fn lua_call_original_quick(L: *mut lua_ffi::lua_State) -> std:
     1
 }
 
-unsafe fn read_preorig_return(
-    ctx_ptr: *mut hook_ffi::HookContext,
-    return_type: u8,
-) -> u64 {
+unsafe fn read_preorig_return(ctx_ptr: *mut hook_ffi::HookContext, return_type: u8) -> u64 {
     if ctx_ptr.is_null() {
         return 0;
     }
@@ -1019,11 +1029,7 @@ unsafe fn read_preorig_return(
     }
 }
 
-unsafe fn write_quick_return(
-    ctx_ptr: *mut hook_ffi::HookContext,
-    raw: u64,
-    return_type: u8,
-) {
+unsafe fn write_quick_return(ctx_ptr: *mut hook_ffi::HookContext, raw: u64, return_type: u8) {
     if ctx_ptr.is_null() {
         return;
     }
@@ -1106,11 +1112,7 @@ unsafe fn quick_return_raw(
     crate::jsapi::java::decode_jobject_raw(env, ret as *mut std::ffi::c_void).unwrap_or(0)
 }
 
-unsafe fn push_quick_return_value(
-    L: *mut lua_ffi::lua_State,
-    raw: u64,
-    return_type: u8,
-) {
+unsafe fn push_quick_return_value(L: *mut lua_ffi::lua_State, raw: u64, return_type: u8) {
     match return_type {
         b'V' => lua_ffi::lua_pushnil(L),
         b'Z' => lua_ffi::lua_pushboolean(L, if raw != 0 { 1 } else { 0 }),
@@ -1140,11 +1142,7 @@ unsafe fn push_quick_return_value(
 const SHADOW_FRAME_NUMBER_OF_VREGS_OFFSET: usize = 24;
 const SHADOW_FRAME_VREGS_OFFSET: usize = 36;
 
-unsafe fn decode_do_call_input_regs(
-    inst: *const u16,
-    inst_data: u16,
-    is_range: bool,
-) -> Option<Vec<u32>> {
+unsafe fn decode_do_call_input_regs(inst: *const u16, inst_data: u16, is_range: bool) -> Option<Vec<u32>> {
     let count = if is_range {
         (inst_data >> 8) as usize
     } else {
@@ -1207,11 +1205,7 @@ unsafe fn read_shadow_frame_ref(shadow_frame: *const u8, vreg: u32) -> Option<u6
     }
 }
 
-unsafe fn read_shadow_frame_arg(
-    shadow_frame: *const u8,
-    vreg: u32,
-    type_sig: Option<&str>,
-) -> Option<u64> {
+unsafe fn read_shadow_frame_arg(shadow_frame: *const u8, vreg: u32, type_sig: Option<&str>) -> Option<u64> {
     match type_sig.and_then(|s| s.as_bytes().first()).copied() {
         Some(b'L') | Some(b'[') => read_shadow_frame_ref(shadow_frame, vreg),
         Some(b'J') | Some(b'D') => {
@@ -1258,15 +1252,11 @@ unsafe fn raw_mirror_to_local_ref(
         return std::ptr::null_mut();
     }
 
-    type ArtNewLocalRefFn =
-        unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void;
-    static ART_NEW_LOCAL_REF: std::sync::OnceLock<Option<ArtNewLocalRefFn>> =
-        std::sync::OnceLock::new();
+    type ArtNewLocalRefFn = unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+    static ART_NEW_LOCAL_REF: std::sync::OnceLock<Option<ArtNewLocalRefFn>> = std::sync::OnceLock::new();
 
     let local = if let Some(add_ref) = *ART_NEW_LOCAL_REF.get_or_init(|| {
-        let sym = crate::jsapi::module::libart_dlsym(
-            "_ZN3art9JNIEnvExt11NewLocalRefEPNS_6mirror6ObjectE",
-        );
+        let sym = crate::jsapi::module::libart_dlsym("_ZN3art9JNIEnvExt11NewLocalRefEPNS_6mirror6ObjectE");
         if sym.is_null() {
             None
         } else {
@@ -1289,18 +1279,13 @@ unsafe fn raw_mirror_to_local_ref(
     local
 }
 
-unsafe fn delete_local_refs(
-    env: crate::jsapi::java::jni_core::JniEnv,
-    local_refs: Vec<*mut std::ffi::c_void>,
-) {
+unsafe fn delete_local_refs(env: crate::jsapi::java::jni_core::JniEnv, local_refs: Vec<*mut std::ffi::c_void>) {
     if env.is_null() {
         return;
     }
     let vtable = *(env as *const *const *const std::ffi::c_void);
-    let delete_local_ref: unsafe extern "C" fn(
-        crate::jsapi::java::jni_core::JniEnv,
-        *mut std::ffi::c_void,
-    ) = std::mem::transmute(*vtable.add(23));
+    let delete_local_ref: unsafe extern "C" fn(crate::jsapi::java::jni_core::JniEnv, *mut std::ffi::c_void) =
+        std::mem::transmute(*vtable.add(23));
     for local in local_refs {
         if !local.is_null() {
             delete_local_ref(env, local);
@@ -1362,8 +1347,15 @@ unsafe fn fallback_call_original(
         std::ptr::null()
     };
     let ret = invoke_original_jni(
-        env, art_method_addr, class_global_ref,
-        hook_ctx.x[1], return_type, is_static, jargs_ptr, quick_trampoline, false,
+        env,
+        art_method_addr,
+        class_global_ref,
+        hook_ctx.x[1],
+        return_type,
+        is_static,
+        jargs_ptr,
+        quick_trampoline,
+        false,
     );
     if return_type != b'V' {
         (*ctx_ptr).x[0] = ret;

@@ -47,15 +47,16 @@ pub(crate) mod reflect;
 
 mod safe_mem;
 
+pub(crate) use art_class::run_pending_checkpoints as run_pending_art_checkpoints;
 pub(crate) use jni_core::ensure_jni_initialized;
 pub(crate) use reflect::get_class_name_unchecked;
-pub(crate) use art_class::run_pending_checkpoints as run_pending_art_checkpoints;
 
-pub(crate) unsafe fn decode_jobject_raw(
-    env: jni_core::JniEnv,
-    obj: *mut std::ffi::c_void,
-) -> Option<u64> {
+pub(crate) unsafe fn decode_jobject_raw(env: jni_core::JniEnv, obj: *mut std::ffi::c_void) -> Option<u64> {
     art_class::decode_jobject(env, obj)
+}
+
+pub(crate) unsafe fn decode_global_jobject_raw(env: jni_core::JniEnv, obj: *mut std::ffi::c_void) -> Option<u64> {
+    art_class::decode_global_jobject(env, obj)
 }
 
 use crate::context::JSContext;
@@ -373,24 +374,22 @@ unsafe extern "C" fn js_java_deoptimize_method(
         );
     }
 
-    let class_name = match crate::jsapi::callback_util::extract_string_arg(
-        ctx, JSValue(*argv), b"class must be a string\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let method_name = match crate::jsapi::callback_util::extract_string_arg(
-        ctx, JSValue(*argv.add(1)), b"method must be a string\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let sig = match crate::jsapi::callback_util::extract_string_arg(
-        ctx, JSValue(*argv.add(2)), b"sig must be a string\0",
-    ) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
+    let class_name =
+        match crate::jsapi::callback_util::extract_string_arg(ctx, JSValue(*argv), b"class must be a string\0") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let method_name =
+        match crate::jsapi::callback_util::extract_string_arg(ctx, JSValue(*argv.add(1)), b"method must be a string\0")
+        {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+    let sig =
+        match crate::jsapi::callback_util::extract_string_arg(ctx, JSValue(*argv.add(2)), b"sig must be a string\0") {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
 
     let env = match ensure_jni_initialized() {
         Ok(e) => e,
@@ -491,22 +490,99 @@ unsafe extern "C" fn js_art_route_stats(
     let obj_val = JSValue(obj);
     obj_val.set_property(ctx, "routerHits", JSValue(ffi::JS_NewBigUint64(ctx, router_hits)));
     obj_val.set_property(ctx, "routerQuickHits", JSValue(ffi::JS_NewBigUint64(ctx, quick_hits)));
-    obj_val.set_property(ctx, "routerQuickPassHits", JSValue(ffi::JS_NewBigUint64(ctx, quick_pass_hits)));
-    obj_val.set_property(ctx, "routerQuickCallbackCalls", JSValue(ffi::JS_NewBigUint64(ctx, quick_callback_calls)));
-    obj_val.set_property(ctx, "routerQuickSkipHits", JSValue(ffi::JS_NewBigUint64(ctx, quick_skip_hits)));
-    obj_val.set_property(ctx, "routerReplacementHits", JSValue(ffi::JS_NewBigUint64(ctx, replacement_hits)));
+    obj_val.set_property(
+        ctx,
+        "routerQuickPassHits",
+        JSValue(ffi::JS_NewBigUint64(ctx, quick_pass_hits)),
+    );
+    obj_val.set_property(
+        ctx,
+        "routerQuickCallbackCalls",
+        JSValue(ffi::JS_NewBigUint64(ctx, quick_callback_calls)),
+    );
+    obj_val.set_property(
+        ctx,
+        "routerQuickSkipHits",
+        JSValue(ffi::JS_NewBigUint64(ctx, quick_skip_hits)),
+    );
+    obj_val.set_property(
+        ctx,
+        "routerReplacementHits",
+        JSValue(ffi::JS_NewBigUint64(ctx, replacement_hits)),
+    );
     obj_val.set_property(ctx, "routerLastX0", JSValue(ffi::JS_NewBigUint64(ctx, router_last_x0)));
     obj_val.set_property(ctx, "routerMisses", JSValue(ffi::JS_NewBigUint64(ctx, miss_count)));
-    obj_val.set_property(ctx, "routerMissLastX0", JSValue(ffi::JS_NewBigUint64(ctx, miss_last_x0)));
-    obj_val.set_property(ctx, "doCallTotal", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::DO_CALL_COUNT.load(std::sync::atomic::Ordering::Relaxed))));
-    obj_val.set_property(ctx, "doCallReplacementHits", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::DO_CALL_HIT_COUNT.load(std::sync::atomic::Ordering::Relaxed))));
-    obj_val.set_property(ctx, "doCallQuickCallbackCalls", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::DO_CALL_QUICK_CALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed))));
-    obj_val.set_property(ctx, "doCallRouterTableHits", JSValue(ffi::JS_NewBigUint64(ctx, do_call_table_hits)));
-    obj_val.set_property(ctx, "doCallRouterLastX0", JSValue(ffi::JS_NewBigUint64(ctx, do_call_last_x0)));
-    obj_val.set_property(ctx, "getOatHookPoolOriginal", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::GET_OAT_HOOK_POOL_ORIGINAL_COUNT.load(std::sync::atomic::Ordering::Relaxed))));
-    obj_val.set_property(ctx, "getOatHookPoolReplacement", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::GET_OAT_HOOK_POOL_REPLACEMENT_COUNT.load(std::sync::atomic::Ordering::Relaxed))));
-    obj_val.set_property(ctx, "getOatHookPoolLastMethod", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::GET_OAT_HOOK_POOL_LAST_METHOD.load(std::sync::atomic::Ordering::Relaxed))));
-    obj_val.set_property(ctx, "getOatHookPoolLastPc", JSValue(ffi::JS_NewBigUint64(ctx, art_controller::GET_OAT_HOOK_POOL_LAST_PC.load(std::sync::atomic::Ordering::Relaxed))));
+    obj_val.set_property(
+        ctx,
+        "routerMissLastX0",
+        JSValue(ffi::JS_NewBigUint64(ctx, miss_last_x0)),
+    );
+    obj_val.set_property(
+        ctx,
+        "doCallTotal",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::DO_CALL_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
+    obj_val.set_property(
+        ctx,
+        "doCallReplacementHits",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::DO_CALL_HIT_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
+    obj_val.set_property(
+        ctx,
+        "doCallQuickCallbackCalls",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::DO_CALL_QUICK_CALLBACK_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
+    obj_val.set_property(
+        ctx,
+        "doCallRouterTableHits",
+        JSValue(ffi::JS_NewBigUint64(ctx, do_call_table_hits)),
+    );
+    obj_val.set_property(
+        ctx,
+        "doCallRouterLastX0",
+        JSValue(ffi::JS_NewBigUint64(ctx, do_call_last_x0)),
+    );
+    obj_val.set_property(
+        ctx,
+        "getOatHookPoolOriginal",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::GET_OAT_HOOK_POOL_ORIGINAL_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
+    obj_val.set_property(
+        ctx,
+        "getOatHookPoolReplacement",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::GET_OAT_HOOK_POOL_REPLACEMENT_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
+    obj_val.set_property(
+        ctx,
+        "getOatHookPoolLastMethod",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::GET_OAT_HOOK_POOL_LAST_METHOD.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
+    obj_val.set_property(
+        ctx,
+        "getOatHookPoolLastPc",
+        JSValue(ffi::JS_NewBigUint64(
+            ctx,
+            art_controller::GET_OAT_HOOK_POOL_LAST_PC.load(std::sync::atomic::Ordering::Relaxed),
+        )),
+    );
     obj
 }
 
@@ -533,16 +609,8 @@ unsafe extern "C" fn js_lua_callback_stats(
     _argc: i32,
     _argv: *mut ffi::JSValue,
 ) -> ffi::JSValue {
-    let (
-        total,
-        active,
-        max_active,
-        thread_states,
-        orig_requests,
-        native_enter,
-        native_leave,
-        native_fail,
-    ) = crate::lua::callback_stats();
+    let (total, active, max_active, thread_states, orig_requests, native_enter, native_leave, native_fail) =
+        crate::lua::callback_stats();
     let obj = ffi::JS_NewObject(ctx);
     let obj_val = JSValue(obj);
     let (quick_active, quick_oldest_age, quick_drop_begin, quick_drop_end, quick_diag) =
@@ -556,8 +624,16 @@ unsafe extern "C" fn js_lua_callback_stats(
     obj_val.set_property(ctx, "nativeLeave", JSValue(ffi::JS_NewBigUint64(ctx, native_leave)));
     obj_val.set_property(ctx, "nativeFail", JSValue(ffi::JS_NewBigUint64(ctx, native_fail)));
     obj_val.set_property(ctx, "quickActive", JSValue(ffi::JS_NewBigUint64(ctx, quick_active)));
-    obj_val.set_property(ctx, "quickOldestAgeMs", JSValue(ffi::JS_NewBigUint64(ctx, quick_oldest_age)));
-    obj_val.set_property(ctx, "quickDropBegin", JSValue(ffi::JS_NewBigUint64(ctx, quick_drop_begin)));
+    obj_val.set_property(
+        ctx,
+        "quickOldestAgeMs",
+        JSValue(ffi::JS_NewBigUint64(ctx, quick_oldest_age)),
+    );
+    obj_val.set_property(
+        ctx,
+        "quickDropBegin",
+        JSValue(ffi::JS_NewBigUint64(ctx, quick_drop_begin)),
+    );
     obj_val.set_property(ctx, "quickDropEnd", JSValue(ffi::JS_NewBigUint64(ctx, quick_drop_end)));
     obj_val.set_property(ctx, "quickDiag", JSValue::string(ctx, &quick_diag));
     obj
@@ -892,8 +968,20 @@ pub fn register_java_api(ctx: &JSContext) {
         add_cfunction_to_object(ctx_ptr, java_obj, "luaHook", js_lua_hook, 4);
         add_cfunction_to_object(ctx_ptr, java_obj, "unhook", js_java_unhook, 3);
         add_cfunction_to_object(ctx_ptr, java_obj, "deopt", js_java_deopt, 0);
-        add_cfunction_to_object(ctx_ptr, java_obj, "deoptimizeBootImage", js_java_deoptimize_boot_image, 0);
-        add_cfunction_to_object(ctx_ptr, java_obj, "deoptimizeEverything", js_java_deoptimize_everything, 0);
+        add_cfunction_to_object(
+            ctx_ptr,
+            java_obj,
+            "deoptimizeBootImage",
+            js_java_deoptimize_boot_image,
+            0,
+        );
+        add_cfunction_to_object(
+            ctx_ptr,
+            java_obj,
+            "deoptimizeEverything",
+            js_java_deoptimize_everything,
+            0,
+        );
         add_cfunction_to_object(ctx_ptr, java_obj, "deoptimizeMethod", js_java_deoptimize_method, 3);
         add_cfunction_to_object(ctx_ptr, java_obj, "setStealth", js_java_set_stealth, 1);
         add_cfunction_to_object(ctx_ptr, java_obj, "getStealth", js_java_get_stealth, 0);
@@ -901,7 +989,13 @@ pub fn register_java_api(ctx: &JSContext) {
         add_cfunction_to_object(ctx_ptr, java_obj, "_artRouteStats", js_art_route_stats, 0);
         add_cfunction_to_object(ctx_ptr, java_obj, "_resetArtRouteStats", js_reset_art_route_stats, 0);
         add_cfunction_to_object(ctx_ptr, java_obj, "_luaCallbackStats", js_lua_callback_stats, 0);
-        add_cfunction_to_object(ctx_ptr, java_obj, "_resetLuaCallbackStats", js_reset_lua_callback_stats, 0);
+        add_cfunction_to_object(
+            ctx_ptr,
+            java_obj,
+            "_resetLuaCallbackStats",
+            js_reset_lua_callback_stats,
+            0,
+        );
         add_cfunction_to_object(ctx_ptr, java_obj, "_methods", js_java_methods, 1);
         // Instance method invocation helper used by Java object proxies
         add_cfunction_to_object(ctx_ptr, java_obj, "_invokeMethod", js_java_invoke_method, 4);
@@ -927,19 +1021,15 @@ pub fn register_java_api(ctx: &JSContext) {
             java_array_api::js_java_array_length,
             1,
         );
-        add_cfunction_to_object(
-            ctx_ptr,
-            java_obj,
-            "_arrayGet",
-            java_array_api::js_java_array_get,
-            3,
-        );
+        add_cfunction_to_object(ctx_ptr, java_obj, "_arrayGet", java_array_api::js_java_array_get, 3);
 
         // 检测面测试 API
         add_cfunction_to_object(ctx_ptr, java_obj, "_inspectArtMethod", js_java_inspect_art_method, 3);
         add_cfunction_to_object(ctx_ptr, java_obj, "_jitInfo", js_java_jit_info, 0);
         add_cfunction_to_object(ctx_ptr, java_obj, "compileMethod", js_java_compile_method, 4);
         add_cfunction_to_object(ctx_ptr, java_obj, "luaFastMethod", js_java_lua_fast_method, 3);
+        add_cfunction_to_object(ctx_ptr, java_obj, "luaFastConstructor", js_java_lua_fast_constructor, 3);
+        add_cfunction_to_object(ctx_ptr, java_obj, "luaFastField", js_java_lua_fast_field, 3);
         add_cfunction_to_object(
             ctx_ptr,
             java_obj,
@@ -959,22 +1049,10 @@ pub fn register_java_api(ctx: &JSContext) {
             js_java_find_class_with_loader,
             2,
         );
-        add_cfunction_to_object(
-            ctx_ptr,
-            java_obj,
-            "_findClassObject",
-            js_java_find_class_object,
-            1,
-        );
+        add_cfunction_to_object(ctx_ptr, java_obj, "_findClassObject", js_java_find_class_object, 1);
         add_cfunction_to_object(ctx_ptr, java_obj, "_setClassLoader", js_java_set_classloader, 1);
         // Java.choose() backend: 走 VMDebug.getInstancesOfClasses 枚举堆上实例
-        add_cfunction_to_object(
-            ctx_ptr,
-            java_obj,
-            "_enumerateInstances",
-            js_java_enumerate_instances,
-            3,
-        );
+        add_cfunction_to_object(ctx_ptr, java_obj, "_enumerateInstances", js_java_enumerate_instances, 3);
         // Java.choose() 配套：批量释放 wrapper 持有的 JNI global refs
         add_cfunction_to_object(
             ctx_ptr,
@@ -1028,12 +1106,16 @@ pub(super) unsafe fn restore_art_method_fields(data: &JavaHookData) {
 /// 移除 Layer 3 per-method inline hook + stealth2 revert_slot_patch。
 pub(super) unsafe fn remove_per_method_hook(data: &JavaHookData) {
     match &data.hook_type {
-        callback::HookType::Replaced { per_method_hook_target, .. }
-        | callback::HookType::Quick { per_method_hook_target, .. } => {
-        if let Some(target) = per_method_hook_target {
-            hook_ffi::hook_remove(*target as *mut std::ffi::c_void);
-            let _ = crate::recomp::revert_slot_patch(data.original_entry_point as usize);
+        callback::HookType::Replaced {
+            per_method_hook_target, ..
         }
+        | callback::HookType::Quick {
+            per_method_hook_target, ..
+        } => {
+            if let Some(target) = per_method_hook_target {
+                hook_ffi::hook_remove(*target as *mut std::ffi::c_void);
+                let _ = crate::recomp::revert_slot_patch(data.original_entry_point as usize);
+            }
         }
     }
 }
@@ -1046,8 +1128,9 @@ pub(super) unsafe fn remove_native_trampoline(data: &JavaHookData) {
 /// 释放 replacement ArtMethod 堆内存 + JNI global ref + JS callback。
 pub(super) unsafe fn free_java_hook_resources(data: &JavaHookData, env_opt: Option<JniEnv>) {
     let replacement_addr = match &data.hook_type {
-        callback::HookType::Replaced { replacement_addr, .. }
-        | callback::HookType::Quick { replacement_addr, .. } => *replacement_addr,
+        callback::HookType::Replaced { replacement_addr, .. } | callback::HookType::Quick { replacement_addr, .. } => {
+            *replacement_addr
+        }
     };
     if replacement_addr != 0 {
         libc::free(replacement_addr as *mut std::ffi::c_void);

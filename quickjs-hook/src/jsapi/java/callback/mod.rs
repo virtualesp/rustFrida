@@ -9,11 +9,10 @@
 use crate::ffi;
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::callback_util::{
-    ensure_registry_initialized, extract_pointer_address, extract_string_arg,
-    get_js_u64_property_atom, hot_atoms, invoke_hook_callback_common,
-    invoke_hook_callback_common_with_env, js_value_to_u64_or_zero, set_js_cfunction_property,
-    set_js_u64_property_atom, set_js_value_property_atom, throw_internal_error, throw_type_error,
-    BiMap,
+    ensure_registry_initialized, extract_pointer_address, extract_string_arg, get_js_u64_property_atom, hot_atoms,
+    invoke_hook_callback_common, invoke_hook_callback_common_with_env, js_value_to_u64_or_zero,
+    set_js_cfunction_property, set_js_u64_property_atom, set_js_value_property_atom, throw_internal_error,
+    throw_type_error, BiMap,
 };
 use crate::value::JSValue;
 use std::cell::Cell;

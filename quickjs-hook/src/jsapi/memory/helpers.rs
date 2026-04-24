@@ -25,7 +25,9 @@ pub(super) unsafe fn get_addr_this_or_arg(
         return Some((addr, argv, argc));
     }
     // Fallback: Memory.readXxx(addr, ...) 风格，argv[0] 是地址
-    if argc < 1 { return None; }
+    if argc < 1 {
+        return None;
+    }
     let addr = get_addr_from_arg(ctx, JSValue(*argv))?;
     Some((addr, argv.add(1), argc - 1))
 }

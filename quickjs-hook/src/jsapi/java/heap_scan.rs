@@ -102,16 +102,14 @@ type ScopedSuspendAllCtorFn = unsafe extern "C" fn(*mut c_void, *const c_char, u
 type ScopedSuspendAllDtorFn = unsafe extern "C" fn(*mut c_void);
 
 /// `art::gc::ScopedGCCriticalSection::ScopedGCCriticalSection(Thread*, GcCause, CollectorType)`
-type ScopedGCCriticalSectionCtorFn =
-    unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32);
+type ScopedGCCriticalSectionCtorFn = unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32);
 
 /// `art::gc::ScopedGCCriticalSection::~ScopedGCCriticalSection()`
 type ScopedGCCriticalSectionDtorFn = unsafe extern "C" fn(*mut c_void);
 
 /// `jobject art::JavaVMExt::AddGlobalRef(Thread*, ObjPtr<Object>)`
 /// x0=this(JavaVMExt*), x1=Thread*, x2=mirror::Object*
-type AddGlobalRefFn =
-    unsafe extern "C" fn(*mut c_void, *mut c_void, u64) -> *mut c_void;
+type AddGlobalRefFn = unsafe extern "C" fn(*mut c_void, *mut c_void, u64) -> *mut c_void;
 
 // ============================================================================
 // 符号表
@@ -143,9 +141,7 @@ static CLASS_OBJECT_SIZE_OFFSET: OnceLock<usize> = OnceLock::new();
 /// 探测失败 fallback 到 `CLASS_OBJECT_SIZE_OFFSET_CANDIDATES[0]`（最现代版本的值）。
 fn resolve_class_object_size_offset() -> usize {
     *CLASS_OBJECT_SIZE_OFFSET.get_or_init(|| unsafe {
-        let fn_addr = crate::jsapi::module::libart_dlsym(
-            "_ZN3art6mirror5Class26SetObjectSizeAllocFastPathEj",
-        ) as u64;
+        let fn_addr = crate::jsapi::module::libart_dlsym("_ZN3art6mirror5Class26SetObjectSizeAllocFastPathEj") as u64;
         let fallback = CLASS_OBJECT_SIZE_OFFSET_CANDIDATES[0];
         if fn_addr == 0 {
             output_verbose(&format!(
@@ -196,8 +192,11 @@ fn resolve_art_heap_api() -> Option<&'static ArtHeapApi> {
                 addr
             };
 
-            let thread_current =
-                resolve("_ZN3art6Thread14CurrentFromGdbEv", &mut missing, "Thread::CurrentFromGdb");
+            let thread_current = resolve(
+                "_ZN3art6Thread14CurrentFromGdbEv",
+                &mut missing,
+                "Thread::CurrentFromGdb",
+            );
             // Thread::DecodeGlobalJObject（API 36+）/ Thread::DecodeJObject（API ≤13）同签名：
             // x0=this, x1=jobject, 返回 mirror::Object* u64。按 Frida optionals 顺序尝试。
             let decode_global = crate::jsapi::module::dlsym_first_match(&[
@@ -212,11 +211,7 @@ fn resolve_art_heap_api() -> Option<&'static ArtHeapApi> {
                 &mut missing,
                 "ScopedSuspendAll::ctor",
             );
-            let ssa_dtor = resolve(
-                "_ZN3art16ScopedSuspendAllD1Ev",
-                &mut missing,
-                "ScopedSuspendAll::dtor",
-            );
+            let ssa_dtor = resolve("_ZN3art16ScopedSuspendAllD1Ev", &mut missing, "ScopedSuspendAll::dtor");
             let sgcs_ctor = resolve(
                 "_ZN3art2gc23ScopedGCCriticalSectionC1EPNS_6ThreadENS0_7GcCauseENS0_13CollectorTypeE",
                 &mut missing,
@@ -239,10 +234,7 @@ fn resolve_art_heap_api() -> Option<&'static ArtHeapApi> {
             }
 
             if !missing.is_empty() {
-                output_verbose(&format!(
-                    "[heap_scan] libart symbols missing: {}",
-                    missing.join(", ")
-                ));
+                output_verbose(&format!("[heap_scan] libart symbols missing: {}", missing.join(", ")));
                 return None;
             }
 
@@ -306,8 +298,7 @@ fn is_boot_image_vma_name(name: &str) -> bool {
 /// 这里存 app 级编译类的 mirror::Class 副本，App-level Activity 子类的 super_class_
 /// 字段可能 fall 在这里。
 fn is_dalvik_cache_art_file(name: &str) -> bool {
-    (name.starts_with("/data/dalvik-cache/") || name.starts_with("/data/misc/apexdata/"))
-        && name.ends_with(".art")
+    (name.starts_with("/data/dalvik-cache/") || name.starts_with("/data/misc/apexdata/")) && name.ends_with(".art")
 }
 
 /// 自己解析 /proc/self/maps 的一行。标准 `util::proc_maps_entries` 走 `split_whitespace`，
@@ -388,10 +379,7 @@ fn enumerate_heap_regions() -> (Vec<HeapRegion>, Vec<HeapRegion>) {
             let reg = HeapRegion { start, end };
             scan_regions.push(reg);
             class_range_regions.push(reg);
-        } else if is_non_moving_space_name(path)
-            || is_boot_image_vma_name(path)
-            || is_dalvik_cache_art_file(path)
-        {
+        } else if is_non_moving_space_name(path) || is_boot_image_vma_name(path) || is_dalvik_cache_art_file(path) {
             class_range_regions.push(HeapRegion { start, end });
         }
     }
@@ -418,8 +406,7 @@ fn probe_super_class_offset(env: JniEnv, api: &ArtHeapApi, self_thread: *mut c_v
     *SUPER_CLASS_OFFSET.get_or_init(|| unsafe {
         let new_global_ref: NewGlobalRefFn = jni_fn!(env, NewGlobalRefFn, JNI_NEW_GLOBAL_REF);
         let delete_local_ref: DeleteLocalRefFn = jni_fn!(env, DeleteLocalRefFn, JNI_DELETE_LOCAL_REF);
-        let delete_global_ref: DeleteGlobalRefFn =
-            jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
+        let delete_global_ref: DeleteGlobalRefFn = jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
 
         let probe_one = |class_name: &str| -> Option<u64> {
             let local = find_class_safe(env, class_name);
@@ -538,12 +525,12 @@ unsafe fn collect_subclass_set(
 #[derive(Default, Debug)]
 struct SuperWalkStats {
     total_candidates: usize,
-    aborted_super_oor: usize,    // super_addr 超出 class_range
-    aborted_null_super: usize,   // super == 0（Object）
+    aborted_super_oor: usize,  // super_addr 超出 class_range
+    aborted_null_super: usize, // super == 0（Object）
     aborted_self_loop: usize,
-    aborted_next_oor: usize,     // super 指向的 class 不在 class_range
-    aborted_not_class: usize,    // super 指向的位置 class_of_class 不对
-    aborted_depth: usize,        // 超过最大深度
+    aborted_next_oor: usize,  // super 指向的 class 不在 class_range
+    aborted_not_class: usize, // super 指向的位置 class_of_class 不对
+    aborted_depth: usize,     // 超过最大深度
 }
 
 #[inline]
@@ -615,9 +602,8 @@ pub(super) unsafe fn heap_scan_enumerate_instances(
     include_subtypes: bool,
     max_count: usize,
 ) -> Result<Vec<*mut c_void>, String> {
-    let api = resolve_art_heap_api().ok_or_else(|| {
-        "[heap_scan] libart symbols unavailable (ART internal layout changed?)".to_string()
-    })?;
+    let api = resolve_art_heap_api()
+        .ok_or_else(|| "[heap_scan] libart symbols unavailable (ART internal layout changed?)".to_string())?;
 
     // 当前线程对应的 art::Thread*
     let self_thread = (api.thread_current)();
@@ -638,8 +624,7 @@ pub(super) unsafe fn heap_scan_enumerate_instances(
     // 这条路径在 API 36 上会 access some stale state 导致 SIGSEGV；所以必须传 global ref。
     let new_global_ref: NewGlobalRefFn = jni_fn!(env, NewGlobalRefFn, JNI_NEW_GLOBAL_REF);
     let delete_local_ref: DeleteLocalRefFn = jni_fn!(env, DeleteLocalRefFn, JNI_DELETE_LOCAL_REF);
-    let delete_global_ref: DeleteGlobalRefFn =
-        jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
+    let delete_global_ref: DeleteGlobalRefFn = jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
 
     let java_lang_class_local = find_class_safe(env, "java.lang.Class");
     if java_lang_class_local.is_null() {
@@ -783,7 +768,6 @@ pub(super) unsafe fn heap_scan_enumerate_instances(
         ));
     }
 
-
     // 把 mirror::Object* 包成 JNI global ref
     let mut global_refs = Vec::with_capacity(hits.len());
     // 用 HashSet 去重 —— 扫描中理论上不会重复，但 large object space 某些对象 8B 对齐
@@ -892,4 +876,3 @@ unsafe fn object_step_bytes(class_ptr: u64, class_obj_size_off: usize) -> u64 {
 fn address_in_any_region(addr: u64, regions: &[HeapRegion]) -> bool {
     regions.iter().any(|r| addr >= r.start && addr + 4 <= r.end)
 }
-

@@ -12,10 +12,7 @@ use crate::ffi;
 use crate::value::JSValue;
 
 /// 提取 JS 端 bytes 参数（ArrayBuffer / TypedArray / Array<number>）到 `Vec<u8>`。
-pub(super) unsafe fn extract_bytes(
-    ctx: *mut ffi::JSContext,
-    val: JSValue,
-) -> Result<Vec<u8>, ffi::JSValue> {
+pub(super) unsafe fn extract_bytes(ctx: *mut ffi::JSContext, val: JSValue) -> Result<Vec<u8>, ffi::JSValue> {
     // JS_GetArrayBuffer 对合法 ArrayBuffer 返回 (data_ptr, byte_length)；对非 AB
     // 返回 NULL+size=0. 空 AB 会返回非 NULL + size=0（data 分配存在但长度 0），
     // 我们把它视作有效输入并返回空 Vec，避免上层 reject empty ArrayBuffer 输入。
@@ -29,8 +26,7 @@ pub(super) unsafe fn extract_bytes(
     let mut byte_offset: usize = 0;
     let mut byte_length: usize = 0;
     let mut bpe: usize = 0;
-    let typed_ab =
-        ffi::JS_GetTypedArrayBuffer(ctx, val.raw(), &mut byte_offset, &mut byte_length, &mut bpe);
+    let typed_ab = ffi::JS_GetTypedArrayBuffer(ctx, val.raw(), &mut byte_offset, &mut byte_length, &mut bpe);
     if ffi::qjs_is_exception(typed_ab) != 0 {
         let exc = ffi::JS_GetException(ctx);
         ffi::qjs_free_value(ctx, exc);
@@ -57,11 +53,7 @@ pub(super) unsafe fn extract_bytes(
     }
 
     if ffi::JS_IsArray(ctx, val.raw()) != 0 {
-        let len_val_raw = ffi::qjs_get_property(
-            ctx,
-            val.raw(),
-            ffi::JS_NewAtom(ctx, b"length\0".as_ptr() as *const _),
-        );
+        let len_val_raw = ffi::qjs_get_property(ctx, val.raw(), ffi::JS_NewAtom(ctx, b"length\0".as_ptr() as *const _));
         let len_val = JSValue(len_val_raw);
         let len_i = len_val.to_i64(ctx).unwrap_or(0);
         len_val.free(ctx);
@@ -102,17 +94,11 @@ pub(super) unsafe extern "C" fn memory_writest(
     let (addr, rem_argv, rem_argc) = match get_addr_this_or_arg(ctx, this, argc, argv) {
         Some(v) => v,
         None => {
-            return ffi::JS_ThrowTypeError(
-                ctx,
-                b"writest() requires a pointer\0".as_ptr() as *const _,
-            );
+            return ffi::JS_ThrowTypeError(ctx, b"writest() requires a pointer\0".as_ptr() as *const _);
         }
     };
     if rem_argc < 1 {
-        return ffi::JS_ThrowTypeError(
-            ctx,
-            b"writest() requires bytes argument\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowTypeError(ctx, b"writest() requires bytes argument\0".as_ptr() as *const _);
     }
 
     let bytes = match extract_bytes(ctx, JSValue(*rem_argv)) {
@@ -123,22 +109,14 @@ pub(super) unsafe extern "C" fn memory_writest(
     // ensure_and_translate 先触发页 recomp + prctl 注册；缺失则报错。
     if let Err(e) = crate::recomp::ensure_and_translate(addr as usize) {
         let msg = format!("writest: recomp init failed: {}\0", e);
-        return ffi::JS_ThrowInternalError(
-            ctx,
-            b"%s\0".as_ptr() as *const _,
-            msg.as_ptr(),
-        );
+        return ffi::JS_ThrowInternalError(ctx, b"%s\0".as_ptr() as *const _, msg.as_ptr());
     }
 
     match crate::recomp::install_patch(addr as usize, &bytes) {
         Ok(()) => JSValue::undefined().raw(),
         Err(msg) => {
             let cmsg = format!("writest: {}\0", msg);
-            ffi::JS_ThrowInternalError(
-                ctx,
-                b"%s\0".as_ptr() as *const _,
-                cmsg.as_ptr(),
-            )
+            ffi::JS_ThrowInternalError(ctx, b"%s\0".as_ptr() as *const _, cmsg.as_ptr())
         }
     }
 }

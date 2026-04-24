@@ -15,7 +15,7 @@ use crate::value::JSValue;
 use super::callback::wrap_java_object_ref_for_array_elem;
 use super::jni_core::get_thread_env;
 use super::jni_core::{
-    jni_check_exc, jni_fn_ptr, GetArrayLengthFn, GetObjectArrayElementFn, JNI_GET_ARRAY_LENGTH,
+    jni_check_exc, jni_fn_ptr, GetArrayLengthFn, GetObjectArrayElementFn, JniEnv, JNI_GET_ARRAY_LENGTH,
     JNI_GET_OBJECT_ARRAY_ELEMENT,
 };
 

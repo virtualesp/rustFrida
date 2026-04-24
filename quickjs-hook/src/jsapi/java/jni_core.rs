@@ -124,22 +124,14 @@ pub(super) type PopLocalFrameFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_
 pub(super) type GetArrayLengthFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void) -> i32;
 pub(super) type GetObjectArrayElementFn =
     unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32) -> *mut std::ffi::c_void;
-pub(super) type GetBooleanArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut u8);
-pub(super) type GetByteArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i8);
-pub(super) type GetCharArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut u16);
-pub(super) type GetShortArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i16);
-pub(super) type GetIntArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i32);
-pub(super) type GetLongArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i64);
-pub(super) type GetFloatArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut f32);
-pub(super) type GetDoubleArrayRegionFn =
-    unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut f64);
+pub(super) type GetBooleanArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut u8);
+pub(super) type GetByteArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i8);
+pub(super) type GetCharArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut u16);
+pub(super) type GetShortArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i16);
+pub(super) type GetIntArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i32);
+pub(super) type GetLongArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut i64);
+pub(super) type GetFloatArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut f32);
+pub(super) type GetDoubleArrayRegionFn = unsafe extern "C" fn(JniEnv, *mut std::ffi::c_void, i32, i32, *mut f64);
 pub(super) type CallObjectMethodAFn = unsafe extern "C" fn(
     JniEnv,
     *mut std::ffi::c_void,

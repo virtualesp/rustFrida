@@ -717,20 +717,89 @@
 
     // Convert Java type name to JNI type descriptor (mirrors Rust java_type_to_jni)
     function _jniType(t) {
-        switch(t) {
-            case "void": case "V": return "V";
-            case "boolean": case "Z": return "Z";
-            case "byte": case "B": return "B";
-            case "char": case "C": return "C";
-            case "short": case "S": return "S";
-            case "int": case "I": return "I";
-            case "long": case "J": return "J";
-            case "float": case "F": return "F";
-            case "double": case "D": return "D";
-            default:
-                if (t.charAt(0) === '[') return t.replace(/\./g, "/");
-                return "L" + t.replace(/\./g, "/") + ";";
+        t = String(t).replace(/^\s+|\s+$/g, "");
+        var dims = 0;
+        while (t.slice(-2) === "[]") {
+            dims++;
+            t = t.slice(0, -2).replace(/^\s+|\s+$/g, "");
         }
+        var base;
+        switch(t) {
+            case "void": case "V": base = "V"; break;
+            case "boolean": case "Z": base = "Z"; break;
+            case "byte": case "B": base = "B"; break;
+            case "char": case "C": base = "C"; break;
+            case "short": case "S": base = "S"; break;
+            case "int": case "I": base = "I"; break;
+            case "long": case "J": base = "J"; break;
+            case "float": case "F": base = "F"; break;
+            case "double": case "D": base = "D"; break;
+            default:
+                if (t.charAt(0) === '[') base = t.replace(/\./g, "/");
+                else if (t.charAt(0) === "L" && t.charAt(t.length - 1) === ";") base = t.replace(/\./g, "/");
+                else base = "L" + t.replace(/\./g, "/") + ";";
+                break;
+        }
+        if (dims === 0) return base;
+        if (base === "V") throw new Error("void[] is not a valid Java type");
+        var prefix = "";
+        for (var i = 0; i < dims; i++) prefix += "[";
+        return prefix + base;
+    }
+
+    function _splitTypeList(s) {
+        s = String(s || "").replace(/^\s+|\s+$/g, "");
+        if (s.length === 0) return [];
+        var parts = s.split(",");
+        var out = [];
+        for (var i = 0; i < parts.length; i++) {
+            var p = parts[i].replace(/^\s+|\s+$/g, "");
+            if (p.length > 0) out.push(p);
+        }
+        return out;
+    }
+
+    function _luaParamsToArray(params) {
+        if (params === undefined || params === null) return [];
+        if (Array.isArray(params)) return params;
+        return _splitTypeList(params);
+    }
+
+    function _luaMethodSigFromParts(params, ret) {
+        var ps = _luaParamsToArray(params);
+        var out = "(";
+        for (var i = 0; i < ps.length; i++) out += _jniType(ps[i]);
+        return out + ")" + _jniType(ret);
+    }
+
+    function _isRawJniMethodSig(sig) {
+        return /^\([^)]*\)(?:V|Z|B|C|S|I|J|F|D|L[^;]+;|\[.+)$/.test(sig);
+    }
+
+    function _luaFriendlyMethodSig(sig, defaultRet) {
+        sig = String(sig).replace(/^\s+|\s+$/g, "");
+        if (_isRawJniMethodSig(sig)) return sig.replace(/\./g, "/");
+
+        var m = sig.match(/^\(([^)]*)\)\s*(?::|->)\s*(.+)$/);
+        if (!m && defaultRet !== undefined) {
+            var argsOnly = sig.match(/^\(([^)]*)\)$/);
+            if (argsOnly) m = [sig, argsOnly[1], defaultRet];
+        }
+        if (!m) {
+            m = sig.match(/^(.+?)\s*(?::|->)\s*(.+)$/);
+        }
+        if (!m) {
+            throw new Error("lua bind method sig must be raw JNI, '(args): return', or 'args -> return': " + sig);
+        }
+        var params = _splitTypeList(m[1]);
+        var ret = m[2].replace(/^\s+|\s+$/g, "");
+        return _luaMethodSigFromParts(params, ret);
+    }
+
+    function _luaFriendlyFieldSig(sig) {
+        sig = String(sig).replace(/^\s+|\s+$/g, "");
+        if (/^(?:Z|B|C|S|I|J|F|D|L[^;]+;|\[.+)$/.test(sig)) return sig.replace(/\./g, "/");
+        return _jniType(sig);
     }
 
     // 获取方法列表（带缓存）
@@ -938,6 +1007,208 @@
             }
         }
     });
+
+    function _luaString(s) {
+        s = String(s);
+        return '"' + s
+            .replace(/\\/g, "\\\\")
+            .replace(/"/g, '\\"')
+            .replace(/\n/g, "\\n")
+            .replace(/\r/g, "\\r")
+            .replace(/\t/g, "\\t") + '"';
+    }
+
+    function _hasOwn(obj, key) {
+        return Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
+    function _luaBindType(name, def) {
+        if (Array.isArray(def)) return "method";
+        if (typeof def === "string") {
+            var s = def.replace(/^\s+|\s+$/g, "");
+            if (/^(?:ctor|constructor|new)\b/.test(s)) return "constructor";
+            return "field";
+        }
+        var type = _hasOwn(def, "type") ? def.type : (_hasOwn(def, "op") ? def.op : undefined);
+        if (type) return String(type);
+        if (_hasOwn(def, "kind")) {
+            var kind = String(def.kind);
+            if (/^(?:method|field|constructor|ctor|new)$/.test(kind)) return kind;
+        }
+        if (_hasOwn(def, "field") || _hasOwn(def, "fieldName")) return "field";
+        if (_hasOwn(def, "ctor") || _hasOwn(def, "constructor") || def.name === "<init>") return "constructor";
+        if (_hasOwn(def, "method") || _hasOwn(def, "methodName") || _hasOwn(def, "name")) return "method";
+        throw new Error("Java.luaBind." + name + ": missing type");
+    }
+
+    function _luaNormalizeBindDef(name, def, defaultClass) {
+        if (Array.isArray(def)) {
+            if (def.length !== 2 || !Array.isArray(def[0])) {
+                throw new Error("Java.luaBind." + name + ": array form must be [[fridaParamTypes...], returnType]");
+            }
+            var arrOut = { type: "method", method: name, sig: _luaMethodSigFromParts(def[0], def[1]) };
+            if (defaultClass) arrOut.className = defaultClass;
+            return arrOut;
+        }
+        if (typeof def === "string") {
+            var raw = def.replace(/^\s+|\s+$/g, "");
+            var type = _luaBindType(name, raw);
+            var body = raw.replace(/^(?:ctor|constructor|new)\b\s*/, "");
+            var out = { type: type };
+            if (defaultClass) out.className = defaultClass;
+            if (type === "field") {
+                out.field = name;
+                out.sig = _luaFriendlyFieldSig(raw);
+            } else if (type === "constructor") {
+                out.sig = _luaFriendlyMethodSig(body, "void");
+            } else {
+                out.method = name;
+                out.sig = _luaFriendlyMethodSig(body);
+            }
+            return out;
+        }
+        if (!def || typeof def !== "object") {
+            throw new Error("Java.luaBind." + name + ": binding must be an object or string");
+        }
+        var copy = {};
+        for (var k in def) {
+            if (Object.prototype.hasOwnProperty.call(def, k)) copy[k] = def[k];
+        }
+        if (defaultClass && !copy.className && !copy.class && !copy.cls) {
+            copy.className = defaultClass;
+        }
+        var type = _luaBindType(name, copy);
+        if (type === "method") {
+            throw new Error("Java.luaBind." + name + ": method signature must be [[fridaParamTypes...], returnType]");
+        }
+        if (type === "field") {
+            copy.sig = _luaFriendlyFieldSig(copy.sig || copy.signature);
+        } else if (copy.sig || copy.signature) {
+            copy.sig = _luaFriendlyMethodSig(copy.sig || copy.signature, "void");
+        }
+        return copy;
+    }
+
+    function _luaBindClass(name, def) {
+        var cls = def.className || def.class || def.cls;
+        if (typeof cls !== "string" || cls.length === 0) {
+            throw new Error("Java.luaBind." + name + ": missing className");
+        }
+        return cls;
+    }
+
+    function _luaBindSig(name, def) {
+        var sig = def.sig || def.signature;
+        if (typeof sig !== "string" || sig.length === 0) {
+            throw new Error("Java.luaBind." + name + ": missing sig");
+        }
+        return sig;
+    }
+
+    function _luaBindCompileOptions(def) {
+        return {
+            compile: true,
+            kind: def.compileKind || def.jitKind || "auto"
+        };
+    }
+
+    function _luaResolveMethodStatic(name, cls, method, sig) {
+        var methods = _methods(cls);
+        var found = null;
+        for (var i = 0; i < methods.length; i++) {
+            var m = methods[i];
+            if (m.name === method && m.sig === sig) {
+                if (found !== null && found.static !== m.static) {
+                    throw new Error("Java.luaBind." + name + ": ambiguous static/instance method " + cls + "." + method + sig);
+                }
+                found = m;
+            }
+        }
+        if (found === null) {
+            throw new Error("Java.luaBind." + name + ": method not found " + cls + "." + method + sig);
+        }
+        return !!found.static;
+    }
+
+    function _luaHandleLiteral(handle) {
+        return String(handle).replace(/n$/, "");
+    }
+
+    function _luaBindEmit(spec) {
+        if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+            throw new Error("Java.luaBind(spec) requires an object");
+        }
+
+        var lines = ["(function()", "  local __b = {}"];
+        var keys = Object.keys(spec);
+        for (var i = 0; i < keys.length; i++) {
+            var outName = keys[i];
+            var def = spec[outName];
+
+            var type = _luaBindType(outName, def);
+            var cls = _luaBindClass(outName, def);
+            var handle;
+            if (type === "method") {
+                var method = def.method || def.methodName || def.name;
+                if (typeof method !== "string" || method.length === 0) {
+                    throw new Error("Java.luaBind." + outName + ": missing method");
+                }
+                var sig = _luaBindSig(outName, def);
+                if (_luaResolveMethodStatic(outName, cls, method, sig) && sig.indexOf("static:") !== 0) {
+                    sig = "static:" + sig;
+                }
+                handle = Java.luaFastMethod(cls, method, sig, _luaBindCompileOptions(def));
+                lines.push("  __b[" + _luaString(outName) + "] = jmethod(" + _luaHandleLiteral(handle) + ")");
+            } else if (type === "constructor" || type === "ctor" || type === "new") {
+                handle = Java.luaFastConstructor(cls, _luaBindSig(outName, def), _luaBindCompileOptions(def));
+                lines.push("  __b[" + _luaString(outName) + "] = jctor(" + _luaHandleLiteral(handle) + ")");
+            } else if (type === "field") {
+                var field = def.field || def.fieldName || def.name;
+                if (typeof field !== "string" || field.length === 0) {
+                    throw new Error("Java.luaBind." + outName + ": missing field");
+                }
+                handle = Java.luaFastField(cls, field, def.sig || def.signature);
+                lines.push("  __b[" + _luaString(outName) + "] = jfield(" + _luaHandleLiteral(handle) + ")");
+            } else {
+                throw new Error("Java.luaBind." + outName + ": unsupported type " + type);
+            }
+        }
+        lines.push("  return __b", "end)()");
+        return lines.join("\n");
+    }
+
+    Java.luaBind = function(spec) {
+        if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+            throw new Error("Java.luaBind(spec) requires an object");
+        }
+        var normalized = {};
+        var keys = Object.keys(spec);
+        for (var i = 0; i < keys.length; i++) {
+            var name = keys[i];
+            normalized[name] = _luaNormalizeBindDef(name, spec[name], null);
+        }
+        return _luaBindEmit(normalized);
+    };
+
+    Java.luaBindClass = function(className, spec, defaults) {
+        if (typeof className !== "string" || className.length === 0) {
+            throw new Error("Java.luaBindClass(className, spec) requires className");
+        }
+        if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+            throw new Error("Java.luaBindClass(className, spec) requires a spec object");
+        }
+        defaults = defaults || {};
+        var normalized = {};
+        var keys = Object.keys(spec);
+        for (var i = 0; i < keys.length; i++) {
+            var name = keys[i];
+            var def = _luaNormalizeBindDef(name, spec[name], className);
+            if (defaults.compileKind !== undefined && def.compileKind === undefined) def.compileKind = defaults.compileKind;
+            if (defaults.jitKind !== undefined && def.jitKind === undefined) def.jitKind = defaults.jitKind;
+            normalized[name] = def;
+        }
+        return _luaBindEmit(normalized);
+    };
 
     function _invokeStaticWrapper(wrapper, argsLike) {
         var args = _argsFrom(argsLike);

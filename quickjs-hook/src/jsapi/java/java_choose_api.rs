@@ -13,9 +13,7 @@
 //! JNI 初始化阶段的 `bypass_hidden_api_restrictions` 会放行 reflect 级 hidden-API。
 
 use crate::ffi;
-use crate::jsapi::callback_util::{
-    extract_string_arg, set_js_u64_property, throw_internal_error, throw_type_error,
-};
+use crate::jsapi::callback_util::{extract_string_arg, set_js_u64_property, throw_internal_error, throw_type_error};
 use crate::jsapi::console::output_verbose;
 use crate::value::JSValue;
 use std::ffi::CString;
@@ -117,8 +115,7 @@ pub(super) unsafe extern "C" fn js_java_release_instance_refs(
         Ok(env) => env,
         Err(msg) => return throw_internal_error(ctx, msg),
     };
-    let delete_global_ref: DeleteGlobalRefFn =
-        jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
+    let delete_global_ref: DeleteGlobalRefFn = jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
 
     // 读 length
     let length_val = arr_val.get_property(ctx, "length");
@@ -182,8 +179,7 @@ unsafe fn vmdebug_enumerate(
     //   (a) Android 10~12 Java wrapper:   `([Ljava/lang/Class;Z)[[Ljava/lang/Object;` (2D)
     //   (b) Android 13 @FastNative:        `([Ljava/lang/Class;Z)[Ljava/lang/Object;`  (1D)
     //   (c) Legacy native backing:         `getInstancesOfClassesNative(...)` (1D)
-    let get_static_mid: GetStaticMethodIdFn =
-        jni_fn!(env, GetStaticMethodIdFn, JNI_GET_STATIC_METHOD_ID);
+    let get_static_mid: GetStaticMethodIdFn = jni_fn!(env, GetStaticMethodIdFn, JNI_GET_STATIC_METHOD_ID);
 
     let c_name_main = CString::new("getInstancesOfClasses").unwrap();
     let c_sig_2d = CString::new("([Ljava/lang/Class;Z)[[Ljava/lang/Object;").unwrap();
@@ -207,9 +203,7 @@ unsafe fn vmdebug_enumerate(
         delete_local_ref(env, target_cls);
         delete_local_ref(env, class_cls);
         delete_local_ref(env, vmdebug_cls);
-        return Err(
-            "VMDebug.getInstancesOfClasses[Native] unavailable on this build".to_string(),
-        );
+        return Err("VMDebug.getInstancesOfClasses[Native] unavailable on this build".to_string());
     }
 
     // 构造 Class[]{target_cls}
@@ -236,12 +230,7 @@ unsafe fn vmdebug_enumerate(
     let call_static_obj: CallStaticObjectMethodAFn =
         jni_fn!(env, CallStaticObjectMethodAFn, JNI_CALL_STATIC_OBJECT_METHOD_A);
     let args: [u64; 2] = [classes_arr as u64, if include_subtypes { 1 } else { 0 }];
-    let raw_result = call_static_obj(
-        env,
-        vmdebug_cls,
-        mid,
-        args.as_ptr() as *const std::ffi::c_void,
-    );
+    let raw_result = call_static_obj(env, vmdebug_cls, mid, args.as_ptr() as *const std::ffi::c_void);
 
     delete_local_ref(env, classes_arr);
     delete_local_ref(env, class_cls);
@@ -260,8 +249,7 @@ unsafe fn vmdebug_enumerate(
     }
 
     let get_arr_len: GetArrayLengthFn = jni_fn!(env, GetArrayLengthFn, JNI_GET_ARRAY_LENGTH);
-    let get_arr_elem: GetObjectArrayElementFn =
-        jni_fn!(env, GetObjectArrayElementFn, JNI_GET_OBJECT_ARRAY_ELEMENT);
+    let get_arr_elem: GetObjectArrayElementFn = jni_fn!(env, GetObjectArrayElementFn, JNI_GET_OBJECT_ARRAY_ELEMENT);
 
     let instances_arr = if is_2d {
         let inner = get_arr_elem(env, raw_result, 0);
@@ -341,8 +329,7 @@ unsafe fn heap_scan_enumerate_js(
     // 把 local ref 升成真 global ref：heap_scan 的 DecodeGlobalJObject 会检查 IndirectRef tag
     let new_global_ref: NewGlobalRefFn = jni_fn!(env, NewGlobalRefFn, JNI_NEW_GLOBAL_REF);
     let delete_local_ref: DeleteLocalRefFn = jni_fn!(env, DeleteLocalRefFn, JNI_DELETE_LOCAL_REF);
-    let delete_global_ref: DeleteGlobalRefFn =
-        jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
+    let delete_global_ref: DeleteGlobalRefFn = jni_fn!(env, DeleteGlobalRefFn, JNI_DELETE_GLOBAL_REF);
 
     let class_global = new_global_ref(env, target_cls);
     delete_local_ref(env, target_cls);

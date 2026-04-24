@@ -9,9 +9,8 @@ use super::super::art_method::*;
 use super::super::callback::*;
 use super::super::jni_core::*;
 use super::install_support::{
-    create_class_global_ref, create_quick_stack_sentinel_art_method,
-    create_replacement_art_method, install_per_method_router_hook,
-    update_original_method_flags_for_hook, JavaHookInstallGuard,
+    create_class_global_ref, create_quick_stack_sentinel_art_method, create_replacement_art_method,
+    install_per_method_router_hook, update_original_method_flags_for_hook, JavaHookInstallGuard,
 };
 
 /// 核心安装逻辑 — Lua hook (从 JS 或 Lua 调用)
@@ -31,26 +30,29 @@ pub(crate) unsafe fn install_lua_hook_inner(
 
     let env = ensure_jni_initialized()?;
 
-    let (art_method, is_static) =
-        resolve_art_method(env, class_name, method_name, &actual_sig, force_static)?;
+    let (art_method, is_static) = resolve_art_method(env, class_name, method_name, &actual_sig, force_static)?;
 
     init_java_registry();
     crate::lua::init_lua_registry();
 
     if crate::lua::is_lua_hook(art_method) {
-        crate::lua::register_lua_hook(art_method, crate::lua::LuaHookEntry {
-            bytecode, is_raw_bytecode,
-            is_static,
-            param_count: count_jni_params(&actual_sig),
-            param_types: parse_jni_param_types(&actual_sig),
-            return_type: get_return_type_from_sig(&actual_sig),
-            return_type_sig: get_return_type_sig(&actual_sig),
-            class_global_ref: 0,
-            quick_trampoline: 0,
-            use_blr: false,
-            quick_orig_precall,
+        crate::lua::register_lua_hook(
             art_method,
-        });
+            crate::lua::LuaHookEntry {
+                bytecode,
+                is_raw_bytecode,
+                is_static,
+                param_count: count_jni_params(&actual_sig),
+                param_types: parse_jni_param_types(&actual_sig),
+                return_type: get_return_type_from_sig(&actual_sig),
+                return_type_sig: get_return_type_sig(&actual_sig),
+                class_global_ref: 0,
+                quick_trampoline: 0,
+                use_blr: false,
+                quick_orig_precall,
+                art_method,
+            },
+        );
         output_verbose(&format!(
             "[lua hook] callback 已替换: {}.{}{}",
             class_name, method_name, actual_sig
@@ -58,10 +60,7 @@ pub(crate) unsafe fn install_lua_hook_inner(
         return Ok(());
     }
 
-    if crate::jsapi::callback_util::with_registry(&JAVA_HOOK_REGISTRY, |r| {
-        r.contains_key(&art_method)
-    })
-    .unwrap_or(false)
+    if crate::jsapi::callback_util::with_registry(&JAVA_HOOK_REGISTRY, |r| r.contains_key(&art_method)).unwrap_or(false)
     {
         return Err("method already hooked via JS — unhook first".to_string());
     }
@@ -69,8 +68,7 @@ pub(crate) unsafe fn install_lua_hook_inner(
     let spec = get_art_method_spec(env, art_method);
     let ep_offset = spec.entry_point_offset;
     let data_off = spec.data_offset;
-    let original_access_flags =
-        std::ptr::read_volatile((art_method as usize + spec.access_flags_offset) as *const u32);
+    let original_access_flags = std::ptr::read_volatile((art_method as usize + spec.access_flags_offset) as *const u32);
     let original_data = std::ptr::read_volatile((art_method as usize + data_off) as *const u64);
     let original_entry_point = read_entry_point(art_method, ep_offset);
 
@@ -83,25 +81,30 @@ pub(crate) unsafe fn install_lua_hook_inner(
     let class_global_ref = create_class_global_ref(env, class_name)?;
     let clone_size = spec.size;
     let mut install_guard = JavaHookInstallGuard::new(
-        art_method, spec.access_flags_offset, data_off, ep_offset,
-        original_access_flags, original_data, original_entry_point, class_global_ref,
+        art_method,
+        spec.access_flags_offset,
+        data_off,
+        ep_offset,
+        original_access_flags,
+        original_data,
+        original_entry_point,
+        class_global_ref,
     );
 
     let return_type = get_return_type_from_sig(&actual_sig);
     let has_independent_code = !is_art_quick_entrypoint(original_entry_point, bridge);
 
     if has_independent_code {
-        let (per_method_hook_target, quick_trampoline, use_blr, router_thunk_body) =
-            install_per_method_router_hook(
-                true,
-                original_entry_point,
-                &bridge,
-                ep_offset,
-                env,
-                art_method,
-                method_name == "<init>",
-                false,
-            )?;
+        let (per_method_hook_target, quick_trampoline, use_blr, router_thunk_body) = install_per_method_router_hook(
+            true,
+            original_entry_point,
+            &bridge,
+            ep_offset,
+            env,
+            art_method,
+            method_name == "<init>",
+            false,
+        )?;
         let stack_entry_point = router_thunk_body
             .ok_or("quick stack sentinel requires router thunk body, but hook engine returned NULL")?;
         crate::jsapi::console::output_message(&format!(
@@ -109,14 +112,8 @@ pub(crate) unsafe fn install_lua_hook_inner(
             stack_entry_point,
             per_method_hook_target.unwrap_or(0)
         ));
-        let replacement_addr = create_quick_stack_sentinel_art_method(
-            env,
-            clone_size,
-            spec,
-            data_off,
-            ep_offset,
-            stack_entry_point,
-        )?;
+        let replacement_addr =
+            create_quick_stack_sentinel_art_method(env, clone_size, spec, data_off, ep_offset, stack_entry_point)?;
         install_guard.set_replacement_addr(replacement_addr);
 
         if quick_orig_precall {
@@ -136,46 +133,52 @@ pub(crate) unsafe fn install_lua_hook_inner(
         install_guard.set_replacement_registered();
 
         let bytecode_len = bytecode.len();
-        crate::lua::register_lua_hook(art_method, crate::lua::LuaHookEntry {
-            bytecode,
-            is_raw_bytecode,
-            is_static,
-            param_count: count_jni_params(&actual_sig),
-            param_types: parse_jni_param_types(&actual_sig),
-            return_type,
-            return_type_sig: get_return_type_sig(&actual_sig),
-            class_global_ref,
-            quick_trampoline,
-            use_blr,
-            quick_orig_precall,
+        crate::lua::register_lua_hook(
             art_method,
-        });
-
-        let dummy_bytes = [0u8; 16];
-        with_registry_mut(&JAVA_HOOK_REGISTRY, |registry| {
-            registry.insert(art_method, JavaHookData {
-                art_method,
-                original_access_flags,
-                original_entry_point,
-                original_data,
-                hook_type: HookType::Quick {
-                    replacement_addr,
-                    per_method_hook_target,
-                },
-                clone_addr: 0,
-                class_global_ref,
-                return_type,
-                return_type_sig: get_return_type_sig(&actual_sig),
-                ctx: 0,
-                callback_bytes: dummy_bytes,
-                method_key: method_key(class_name, method_name, &actual_sig),
+            crate::lua::LuaHookEntry {
+                bytecode,
+                is_raw_bytecode,
                 is_static,
                 param_count: count_jni_params(&actual_sig),
                 param_types: parse_jni_param_types(&actual_sig),
-                class_name: class_name.to_string(),
+                return_type,
+                return_type_sig: get_return_type_sig(&actual_sig),
+                class_global_ref,
                 quick_trampoline,
                 use_blr,
-            });
+                quick_orig_precall,
+                art_method,
+            },
+        );
+
+        let dummy_bytes = [0u8; 16];
+        with_registry_mut(&JAVA_HOOK_REGISTRY, |registry| {
+            registry.insert(
+                art_method,
+                JavaHookData {
+                    art_method,
+                    original_access_flags,
+                    original_entry_point,
+                    original_data,
+                    hook_type: HookType::Quick {
+                        replacement_addr,
+                        per_method_hook_target,
+                    },
+                    clone_addr: 0,
+                    class_global_ref,
+                    return_type,
+                    return_type_sig: get_return_type_sig(&actual_sig),
+                    ctx: 0,
+                    callback_bytes: dummy_bytes,
+                    method_key: method_key(class_name, method_name, &actual_sig),
+                    is_static,
+                    param_count: count_jni_params(&actual_sig),
+                    param_types: parse_jni_param_types(&actual_sig),
+                    class_name: class_name.to_string(),
+                    quick_trampoline,
+                    use_blr,
+                },
+            );
         });
 
         cache_fields_for_class(env, class_name);
@@ -189,7 +192,10 @@ pub(crate) unsafe fn install_lua_hook_inner(
     }
 
     let thunk = hook_ffi::hook_create_native_trampoline(
-        art_method, Some(java_hook_callback), art_method as *mut std::ffi::c_void, 0,
+        art_method,
+        Some(java_hook_callback),
+        art_method as *mut std::ffi::c_void,
+        0,
     );
     if thunk.is_null() {
         return Err("hook_create_native_trampoline failed".to_string());
@@ -197,8 +203,14 @@ pub(crate) unsafe fn install_lua_hook_inner(
     install_guard.set_redirect_installed();
 
     let replacement_addr = create_replacement_art_method(
-        art_method, clone_size, spec, original_access_flags, data_off, ep_offset,
-        thunk, jni_trampoline,
+        art_method,
+        clone_size,
+        spec,
+        original_access_flags,
+        data_off,
+        ep_offset,
+        thunk,
+        jni_trampoline,
     )?;
     install_guard.set_replacement_addr(replacement_addr);
 
@@ -214,41 +226,68 @@ pub(crate) unsafe fn install_lua_hook_inner(
         let interp_bridge = bridge.quick_to_interpreter_bridge;
         if interp_bridge != 0 {
             std::ptr::write_volatile((art_method as usize + ep_offset) as *mut u64, interp_bridge);
-            hook_ffi::hook_flush_cache(
-                (art_method as usize + ep_offset) as *mut std::ffi::c_void, 8,
-            );
+            hook_ffi::hook_flush_cache((art_method as usize + ep_offset) as *mut std::ffi::c_void, 8);
         }
     }
 
-    let (_per_method_hook_target, quick_trampoline, use_blr, _router_thunk_body) =
-        install_per_method_router_hook(
-            has_independent_code, original_entry_point, &bridge, ep_offset, env,
-            art_method, method_name == "<init>", false,
-        )?;
+    let (_per_method_hook_target, quick_trampoline, use_blr, _router_thunk_body) = install_per_method_router_hook(
+        has_independent_code,
+        original_entry_point,
+        &bridge,
+        ep_offset,
+        env,
+        art_method,
+        method_name == "<init>",
+        false,
+    )?;
 
     let bytecode_len = bytecode.len();
-    crate::lua::register_lua_hook(art_method, crate::lua::LuaHookEntry {
-        bytecode, is_raw_bytecode, is_static,
-        param_count: count_jni_params(&actual_sig),
-        param_types: parse_jni_param_types(&actual_sig),
-        return_type,
-        return_type_sig: get_return_type_sig(&actual_sig),
-        class_global_ref, quick_trampoline, use_blr, quick_orig_precall, art_method,
-    });
+    crate::lua::register_lua_hook(
+        art_method,
+        crate::lua::LuaHookEntry {
+            bytecode,
+            is_raw_bytecode,
+            is_static,
+            param_count: count_jni_params(&actual_sig),
+            param_types: parse_jni_param_types(&actual_sig),
+            return_type,
+            return_type_sig: get_return_type_sig(&actual_sig),
+            class_global_ref,
+            quick_trampoline,
+            use_blr,
+            quick_orig_precall,
+            art_method,
+        },
+    );
 
     let dummy_bytes = [0u8; 16];
     with_registry_mut(&JAVA_HOOK_REGISTRY, |registry| {
-        registry.insert(art_method, JavaHookData {
-            art_method, original_access_flags, original_entry_point, original_data,
-            hook_type: HookType::Replaced { replacement_addr, per_method_hook_target: _per_method_hook_target },
-            clone_addr: 0, class_global_ref, return_type,
-            return_type_sig: get_return_type_sig(&actual_sig),
-            ctx: 0, callback_bytes: dummy_bytes,
-            method_key: method_key(class_name, method_name, &actual_sig),
-            is_static, param_count: count_jni_params(&actual_sig),
-            param_types: parse_jni_param_types(&actual_sig),
-            class_name: class_name.to_string(), quick_trampoline, use_blr,
-        });
+        registry.insert(
+            art_method,
+            JavaHookData {
+                art_method,
+                original_access_flags,
+                original_entry_point,
+                original_data,
+                hook_type: HookType::Replaced {
+                    replacement_addr,
+                    per_method_hook_target: _per_method_hook_target,
+                },
+                clone_addr: 0,
+                class_global_ref,
+                return_type,
+                return_type_sig: get_return_type_sig(&actual_sig),
+                ctx: 0,
+                callback_bytes: dummy_bytes,
+                method_key: method_key(class_name, method_name, &actual_sig),
+                is_static,
+                param_count: count_jni_params(&actual_sig),
+                param_types: parse_jni_param_types(&actual_sig),
+                class_name: class_name.to_string(),
+                quick_trampoline,
+                use_blr,
+            },
+        );
     });
 
     cache_fields_for_class(env, class_name);
@@ -276,16 +315,20 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_lua_hook(
     }
 
     let class_name = match extract_string_arg(ctx, JSValue(*argv), b"arg1 must be class name\0") {
-        Ok(v) => v, Err(e) => return e,
+        Ok(v) => v,
+        Err(e) => return e,
     };
     let method_name = match extract_string_arg(ctx, JSValue(*argv.add(1)), b"arg2 must be method name\0") {
-        Ok(v) => v, Err(e) => return e,
+        Ok(v) => v,
+        Err(e) => return e,
     };
     let sig_str = match extract_string_arg(ctx, JSValue(*argv.add(2)), b"arg3 must be signature\0") {
-        Ok(v) => v, Err(e) => return e,
+        Ok(v) => v,
+        Err(e) => return e,
     };
     let lua_code = match extract_string_arg(ctx, JSValue(*argv.add(3)), b"arg4 must be lua code\0") {
-        Ok(v) => v, Err(e) => return e,
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
     let lua_source = format!("return {}", lua_code);

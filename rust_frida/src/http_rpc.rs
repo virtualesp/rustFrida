@@ -36,8 +36,7 @@ const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// `bind_addr` 可以是 `"0.0.0.0:9191"` 或 `"127.0.0.1:9191"`。
 pub(crate) fn start(mgr: Arc<SessionManager>, bind_addr: &str) -> Result<(), String> {
-    let listener = TcpListener::bind(bind_addr)
-        .map_err(|e| format!("RPC HTTP bind {} 失败: {}", bind_addr, e))?;
+    let listener = TcpListener::bind(bind_addr).map_err(|e| format!("RPC HTTP bind {} 失败: {}", bind_addr, e))?;
     let actual = listener
         .local_addr()
         .map(|a| a.to_string())
@@ -57,13 +56,11 @@ fn accept_loop(listener: TcpListener, mgr: Arc<SessionManager>) {
         match stream {
             Ok(s) => {
                 let mgr = mgr.clone();
-                let _ = thread::Builder::new()
-                    .name("rpc-http-conn".into())
-                    .spawn(move || {
-                        if let Err(e) = handle_connection(s, mgr) {
-                            log_error!("RPC HTTP 处理失败: {}", e);
-                        }
-                    });
+                let _ = thread::Builder::new().name("rpc-http-conn".into()).spawn(move || {
+                    if let Err(e) = handle_connection(s, mgr) {
+                        log_error!("RPC HTTP 处理失败: {}", e);
+                    }
+                });
             }
             Err(e) => {
                 log_error!("RPC HTTP accept 失败: {}", e);
@@ -117,14 +114,8 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, String
     }
     let trimmed = request_line.trim_end_matches(&['\r', '\n'][..]);
     let mut parts = trimmed.split(' ');
-    let method = parts
-        .next()
-        .ok_or_else(|| "missing method".to_string())?
-        .to_string();
-    let path = parts
-        .next()
-        .ok_or_else(|| "missing path".to_string())?
-        .to_string();
+    let method = parts.next().ok_or_else(|| "missing method".to_string())?.to_string();
+    let path = parts.next().ok_or_else(|| "missing path".to_string())?.to_string();
     let _version = parts.next().ok_or_else(|| "missing version".to_string())?;
 
     // Headers
@@ -159,9 +150,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<HttpRequest, String
 
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader
-            .read_exact(&mut body)
-            .map_err(|e| format!("read body: {}", e))?;
+        reader.read_exact(&mut body).map_err(|e| format!("read body: {}", e))?;
     }
 
     Ok(HttpRequest { method, path, body })
@@ -323,4 +312,3 @@ fn json_string(s: &str) -> String {
     out.push('"');
     out
 }
-

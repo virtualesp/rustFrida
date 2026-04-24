@@ -7,8 +7,8 @@ use crate::ffi;
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::callback_util::{
     acquire_js_engine_for_callback, get_js_u64_property_atom, handle_js_exception, hot_atoms,
-    invoke_hook_callback_common, js_u64_to_js_number_or_bigint, js_value_to_u64_or_zero,
-    set_js_cfunction_property, set_js_u64_property_atom,
+    invoke_hook_callback_common, js_u64_to_js_number_or_bigint, js_value_to_u64_or_zero, set_js_cfunction_property,
+    set_js_u64_property_atom,
 };
 use std::cell::RefCell;
 use std::sync::{Condvar, Mutex};
@@ -305,10 +305,7 @@ fn invocation_pop() -> Option<[u8; 16]> {
 }
 
 /// 构造 invocation context JS 对象: x0-x30 / sp / pc / lr / returnAddress / __hookCtxPtr
-unsafe fn build_invocation_ctx(
-    ctx: *mut ffi::JSContext,
-    hook_ctx_ptr: *mut hook_ffi::HookContext,
-) -> ffi::JSValue {
+unsafe fn build_invocation_ctx(ctx: *mut ffi::JSContext, hook_ctx_ptr: *mut hook_ffi::HookContext) -> ffi::JSValue {
     let js_ctx = ffi::JS_NewObject(ctx);
     let hook_ctx = &*hook_ctx_ptr;
     let atoms = hot_atoms();
@@ -344,7 +341,7 @@ unsafe fn call_interceptor_helper(
     ctx: *mut ffi::JSContext,
     user_bytes: &[u8; 16],
     js_ctx: ffi::JSValue,
-    helper_name: &[u8],  // 必须带末尾 \0
+    helper_name: &[u8], // 必须带末尾 \0
     log_tag: &str,
 ) {
     let user_fn: ffi::JSValue = std::ptr::read(user_bytes.as_ptr() as *const ffi::JSValue);
@@ -409,7 +406,13 @@ pub(crate) unsafe extern "C" fn attach_on_enter_wrapper(
     let js_ctx = build_invocation_ctx(ctx, ctx_ptr);
 
     if has_on_enter {
-        call_interceptor_helper(ctx, &on_enter_bytes, js_ctx, b"__interceptorEnter\0", "interceptor.onEnter");
+        call_interceptor_helper(
+            ctx,
+            &on_enter_bytes,
+            js_ctx,
+            b"__interceptorEnter\0",
+            "interceptor.onEnter",
+        );
     }
 
     sync_js_ctx_to_hook_ctx(ctx, js_ctx, ctx_ptr);
@@ -484,7 +487,13 @@ pub(crate) unsafe extern "C" fn attach_on_leave_wrapper(
         set_js_u64_property_atom(ctx, js_ctx, atoms.x[i], hook_ctx.x[i]);
     }
 
-    call_interceptor_helper(ctx, &on_leave_bytes, js_ctx, b"__interceptorLeave\0", "interceptor.onLeave");
+    call_interceptor_helper(
+        ctx,
+        &on_leave_bytes,
+        js_ctx,
+        b"__interceptorLeave\0",
+        "interceptor.onLeave",
+    );
 
     // 同步可能被 onLeave 改过的 x0
     sync_js_ctx_to_hook_ctx(ctx, js_ctx, ctx_ptr);

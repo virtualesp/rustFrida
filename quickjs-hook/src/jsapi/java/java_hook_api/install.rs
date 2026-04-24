@@ -12,8 +12,8 @@ use super::super::art_method::*;
 use super::super::callback::*;
 use super::super::jni_core::*;
 use super::install_support::{
-    create_class_global_ref, create_replacement_art_method,
-    install_per_method_router_hook, update_original_method_flags_for_hook, JavaHookInstallGuard,
+    create_class_global_ref, create_replacement_art_method, install_per_method_router_hook,
+    update_original_method_flags_for_hook, JavaHookInstallGuard,
 };
 
 pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
@@ -304,19 +304,35 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook_quick(
     let sig_arg = JSValue(*argv.add(2));
     let callback_arg = JSValue(*argv.add(3));
 
-    let class_name = match extract_string_arg(ctx, class_arg, b"Java.hookQuick() first argument must be a class name string\0") {
+    let class_name = match extract_string_arg(
+        ctx,
+        class_arg,
+        b"Java.hookQuick() first argument must be a class name string\0",
+    ) {
         Ok(value) => value,
         Err(err) => return err,
     };
-    let method_name = match extract_string_arg(ctx, method_arg, b"Java.hookQuick() second argument must be a method name string\0") {
+    let method_name = match extract_string_arg(
+        ctx,
+        method_arg,
+        b"Java.hookQuick() second argument must be a method name string\0",
+    ) {
         Ok(value) => value,
         Err(err) => return err,
     };
-    let sig_str = match extract_string_arg(ctx, sig_arg, b"Java.hookQuick() third argument must be a signature string\0") {
+    let sig_str = match extract_string_arg(
+        ctx,
+        sig_arg,
+        b"Java.hookQuick() third argument must be a signature string\0",
+    ) {
         Ok(value) => value,
         Err(err) => return err,
     };
-    if let Err(err) = ensure_function_arg(ctx, callback_arg, b"Java.hookQuick() fourth argument must be a function\0") {
+    if let Err(err) = ensure_function_arg(
+        ctx,
+        callback_arg,
+        b"Java.hookQuick() fourth argument must be a function\0",
+    ) {
         return err;
     }
 

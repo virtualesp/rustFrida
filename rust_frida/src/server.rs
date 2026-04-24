@@ -148,10 +148,7 @@ fn load_script_on_session(session: &Session, script_path: &str) {
         log_error!("[#{}] 发送 jsinit 失败: {}", session.id, e);
         return;
     }
-    match session
-        .eval_state
-        .recv_timeout(std::time::Duration::from_secs(10))
-    {
+    match session.eval_state.recv_timeout(std::time::Duration::from_secs(10)) {
         None => {
             log_warn!("[#{}] 等待引擎初始化超时", session.id);
             return;
@@ -170,10 +167,7 @@ fn load_script_on_session(session: &Session, script_path: &str) {
         log_error!("[#{}] 发送 loadjs 失败: {}", session.id, e);
         return;
     }
-    match session
-        .eval_state
-        .recv_timeout(std::time::Duration::from_secs(30))
-    {
+    match session.eval_state.recv_timeout(std::time::Duration::from_secs(30)) {
         None => log_warn!("[#{}] 脚本加载超时", session.id),
         Some(Err(e)) => log_error!("[#{}] 脚本执行失败: {}", session.id, e),
         Some(Ok(out)) => {
@@ -429,10 +423,7 @@ fn print_server_help() {
     println!("{DIM}  {:<12} {:<28} {}{RESET}", "命令", "参数", "说明");
     println!("{DIM}  {:-<12} {:-<28} {:-<20}{RESET}", "", "", "");
     for (cmd, args, desc) in SERVER_CMDS {
-        println!(
-            "  {BOLD}{GREEN}{:<12}{RESET} {YELLOW}{:<28}{RESET} {}",
-            cmd, args, desc
-        );
+        println!("  {BOLD}{GREEN}{:<12}{RESET} {YELLOW}{:<28}{RESET} {}", cmd, args, desc);
     }
     println!();
     println!("{DIM}  进入 session 后可使用全部 agent 命令 (jsinit/loadjs/jsrepl/hook 等){RESET}");
@@ -503,9 +494,7 @@ pub(crate) fn run_server(args: &Args) {
         }
     }
 
-    println!(
-        "\n  {BOLD}{CYAN}Server 模式已启动{RESET} {DIM}— 输入 help 查看命令, spawn/attach 开始注入{RESET}"
-    );
+    println!("\n  {BOLD}{CYAN}Server 模式已启动{RESET} {DIM}— 输入 help 查看命令, spawn/attach 开始注入{RESET}");
     if args.profile.is_some() {
         log_info!("属性 profile 已加载，spawn 的进程将自动应用");
     }
@@ -552,13 +541,7 @@ pub(crate) fn run_server(args: &Args) {
                         let package = &positional[0];
                         let session = mgr.create_session(package.clone());
                         log_info!("[#{}] 正在 spawn {}...", session.id, package);
-                        do_spawn(
-                            session,
-                            package.clone(),
-                            script,
-                            string_overrides.clone(),
-                            args.verbose,
-                        );
+                        do_spawn(session, package.clone(), script, string_overrides.clone(), args.verbose);
                     }
 
                     // ── attach <pid|name> [-l script.js] ──
@@ -590,14 +573,7 @@ pub(crate) fn run_server(args: &Args) {
                         };
                         let session = mgr.create_session(label.clone());
                         log_info!("[#{}] 正在注入 {} (PID: {})...", session.id, label, pid);
-                        do_attach(
-                            session,
-                            pid,
-                            label,
-                            script,
-                            string_overrides.clone(),
-                            args.verbose,
-                        );
+                        do_attach(session, pid, label, script, string_overrides.clone(), args.verbose);
                     }
 
                     // ── list / sessions ──

@@ -517,6 +517,37 @@ pub(crate) unsafe fn decode_jobject(env: JniEnv, obj: *mut std::ffi::c_void) -> 
     None
 }
 
+pub(crate) unsafe fn decode_global_jobject(env: JniEnv, obj: *mut std::ffi::c_void) -> Option<u64> {
+    const DECODE_GLOBAL_JOBJECT_SYMBOLS: [&str; 3] = [
+        "_ZNK3art6Thread19DecodeGlobalJObjectEP8_jobject",
+        "_ZN3art6Thread19DecodeGlobalJObjectEP8_jobject",
+        "_ZNK3art6Thread13DecodeJObjectEP8_jobject",
+    ];
+
+    let thread = get_thread_ptr(env);
+    if thread == 0 {
+        return None;
+    }
+
+    type DecodeGlobalJObjectFn = unsafe extern "C" fn(thread: u64, obj: *mut std::ffi::c_void) -> u64;
+
+    for sym_name in DECODE_GLOBAL_JOBJECT_SYMBOLS {
+        let decode_sym = libart_dlsym(sym_name);
+        if decode_sym.is_null() {
+            continue;
+        }
+
+        let decode: DecodeGlobalJObjectFn = std::mem::transmute(decode_sym);
+        let result = decode(thread, obj);
+        let stripped = result & PAC_STRIP_MASK;
+        if stripped != 0 {
+            return Some(stripped);
+        }
+    }
+
+    None
+}
+
 /// 解码 jclass 引用为 mirror::Class* 地址
 ///
 /// 策略 1: dlsym Thread::DecodeJObject — 最可靠，支持所有 ref 类型

@@ -39,18 +39,18 @@ pub use context::JSContext;
 pub use jsapi::console::{set_console_callback, set_verbose};
 pub use jsapi::deferred_java_init;
 pub use jsapi::hook_api::cleanup_hooks;
-pub use jsapi::hook_api::{cut_native_hooks, free_native_hooks};
-pub use jsapi::memory::cleanup_wxshadow_patches;
 #[cfg(feature = "qbdi")]
 pub use jsapi::hook_api::preload_qbdi_helper;
 #[cfg(feature = "qbdi")]
 pub use jsapi::hook_api::shutdown_qbdi_helper;
+pub use jsapi::hook_api::{cut_native_hooks, free_native_hooks};
+pub use jsapi::java::art_controller::{
+    cut_art_controller_hooks, cut_art_controller_routing_hooks, cut_art_controller_walkstack_guards,
+    free_art_controller_state,
+};
 pub use jsapi::java::cleanup_java_hooks;
 pub use jsapi::java::{cut_java_hooks, drain_thunk_in_flight, free_java_hooks};
-pub use jsapi::java::art_controller::{
-    cut_art_controller_hooks, cut_art_controller_routing_hooks,
-    cut_art_controller_walkstack_guards, free_art_controller_state,
-};
+pub use jsapi::memory::cleanup_wxshadow_patches;
 pub use runtime::JSRuntime;
 pub use value::JSValue;
 

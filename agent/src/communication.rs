@@ -202,7 +202,9 @@ pub(crate) fn shutdown_stream() {
         }
     }
     if let Some(fd) = GLOBAL_STREAM_FD.get() {
-        unsafe { libc::close(*fd); }
+        unsafe {
+            libc::close(*fd);
+        }
     }
 }
 

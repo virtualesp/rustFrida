@@ -4,16 +4,14 @@ use crate::ffi;
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::callback_util::{
     dup_callback_to_bytes, ensure_function_arg, extract_pointer_address, get_js_u64_property,
-    js_i64_to_js_number_or_bigint, js_value_to_u64_or_zero, set_js_cfunction_property,
-    set_js_u64_property, throw_internal_error,
+    js_i64_to_js_number_or_bigint, js_value_to_u64_or_zero, set_js_cfunction_property, set_js_u64_property,
+    throw_internal_error,
 };
 use crate::jsapi::util::is_addr_accessible;
 use crate::value::JSValue;
 
 use super::callback::{attach_on_enter_wrapper, attach_on_leave_wrapper, hook_callback_wrapper};
-use super::registry::{
-    hook_error_message, init_registry, HookData, HookKind, StealthMode, HOOK_OK, HOOK_REGISTRY,
-};
+use super::registry::{hook_error_message, init_registry, HookData, HookKind, StealthMode, HOOK_OK, HOOK_REGISTRY};
 use crate::jsapi::callback_util::with_registry_mut;
 
 /// hook(ptr, callback, mode?) - Install a hook at the given address
@@ -87,15 +85,11 @@ unsafe fn install_hook(
     // 先拆掉旧 hook（恢复 recomp 页字节 + 回收 slot + 释放老 callback），
     // 等 in-flight native callback 退出，再装新 hook。避免 HashMap.insert
     // 覆盖 HookData 后 slot 泄漏 + orig_insn 被当成"B→老 slot"污染 callOriginal。
-    if let Some(old_data) = with_registry_mut(&HOOK_REGISTRY, |registry| registry.remove(&addr))
-        .flatten()
-    {
+    if let Some(old_data) = with_registry_mut(&HOOK_REGISTRY, |registry| registry.remove(&addr)).flatten() {
         super::remove_single_hook(addr, &old_data);
         // 短 wait 给当前在 thunk 内的 callback 退出；超时就放弃 free（old callback
         // 泄漏一次，callback_wrapper 自带 "not a function" 校验不会崩）。
-        if super::callback::wait_for_in_flight_native_hook_callbacks(
-            std::time::Duration::from_millis(20),
-        ) {
+        if super::callback::wait_for_in_flight_native_hook_callbacks(std::time::Duration::from_millis(20)) {
             super::free_hook_callback(&old_data);
         }
     }
@@ -183,8 +177,7 @@ pub(crate) unsafe extern "C" fn js_unhook(
         Err(e) => return e,
     };
 
-    let registry_data = with_registry_mut(&HOOK_REGISTRY, |registry| registry.remove(&addr))
-        .flatten();
+    let registry_data = with_registry_mut(&HOOK_REGISTRY, |registry| registry.remove(&addr)).flatten();
 
     if let Some(data) = registry_data {
         super::remove_single_hook(addr, &data);
@@ -198,8 +191,7 @@ pub(crate) unsafe extern "C" fn js_unhook(
     //  3) 普通 stealth=0 hook 未登记但 hook engine 已 attach — hook_remove 恢复
     // 三路都静默尝试; 全不命中才报错.
     let slot_cleared = crate::recomp::try_revert_slot_patch(addr as usize);
-    let wxshadow_released =
-        ffi::hook::wxshadow_release(addr as *mut std::ffi::c_void) == 0;
+    let wxshadow_released = ffi::hook::wxshadow_release(addr as *mut std::ffi::c_void) == 0;
     if wxshadow_released {
         crate::jsapi::memory::untrack_wxshadow_addr(addr);
     }
@@ -290,9 +282,9 @@ pub(crate) unsafe extern "C" fn js_call_native(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NativeRetKind {
     Void = 0,
-    Int = 1,      // 整数类型 (bool/char/int/long/size_t/pointer)，从 x0 读
-    Double = 2,   // double / float64，从 d0 读
-    Float32 = 3,  // float (32-bit)，从 s0 读（必须用独立的 extern -> f32 签名）
+    Int = 1,     // 整数类型 (bool/char/int/long/size_t/pointer)，从 x0 读
+    Double = 2,  // double / float64，从 d0 读
+    Float32 = 3, // float (32-bit)，从 s0 读（必须用独立的 extern -> f32 签名）
 }
 
 impl NativeRetKind {
@@ -365,8 +357,8 @@ pub(crate) unsafe extern "C" fn js_native_call(
     if argc < 6 {
         return ffi::JS_ThrowTypeError(
             ctx,
-            b"__nativeCall() requires 6 arguments: addr, retKind, gpr[], fpr[], fprFloatMask, stk[]\0"
-                .as_ptr() as *const _,
+            b"__nativeCall() requires 6 arguments: addr, retKind, gpr[], fpr[], fprFloatMask, stk[]\0".as_ptr()
+                as *const _,
         );
     }
     let addr_arg = JSValue(*argv);
@@ -381,10 +373,7 @@ pub(crate) unsafe extern "C" fn js_native_call(
         Err(e) => return e,
     };
     if addr < 0x10000 || !is_addr_accessible(addr, 4) {
-        return ffi::JS_ThrowRangeError(
-            ctx,
-            b"__nativeCall() address is not mapped\0".as_ptr() as *const _,
-        );
+        return ffi::JS_ThrowRangeError(ctx, b"__nativeCall() address is not mapped\0".as_ptr() as *const _);
     }
     // 检查页是否可执行 (PROT_EXEC): 通过 /proc/self/maps 查 prot 位。
     // 不依赖 dladdr 因为 Memory.alloc 分配的 RWX 页不在任何 loaded SO 里。
@@ -412,10 +401,7 @@ pub(crate) unsafe extern "C" fn js_native_call(
     let kind = match NativeRetKind::from_i32(kind_num as i32) {
         Some(k) => k,
         None => {
-            return ffi::JS_ThrowTypeError(
-                ctx,
-                b"__nativeCall() retKind must be 0..3\0".as_ptr() as *const _,
-            );
+            return ffi::JS_ThrowTypeError(ctx, b"__nativeCall() retKind must be 0..3\0".as_ptr() as *const _);
         }
     };
 
@@ -591,9 +577,7 @@ pub(crate) unsafe extern "C" fn js_interceptor_attach(
     // 同地址重复 attach: 先拆老 hook + 等 in-flight + 释放老 callback
     if let Some(old_data) = with_registry_mut(&HOOK_REGISTRY, |r| r.remove(&addr)).flatten() {
         super::remove_single_hook(addr, &old_data);
-        if super::callback::wait_for_in_flight_native_hook_callbacks(
-            std::time::Duration::from_millis(20),
-        ) {
+        if super::callback::wait_for_in_flight_native_hook_callbacks(std::time::Duration::from_millis(20)) {
             super::free_hook_callback(&old_data);
         }
     }
@@ -611,10 +595,7 @@ pub(crate) unsafe extern "C" fn js_interceptor_attach(
                 Err(e) => {
                     on_enter_val.free(ctx);
                     on_leave_val.free(ctx);
-                    return throw_internal_error(
-                        ctx,
-                        &format!("Interceptor.attach(recomp slot): {}", e),
-                    );
+                    return throw_internal_error(ctx, &format!("Interceptor.attach(recomp slot): {}", e));
                 }
             }
         }
