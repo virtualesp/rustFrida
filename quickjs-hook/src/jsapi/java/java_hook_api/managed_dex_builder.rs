@@ -1679,6 +1679,135 @@ fn emit_discard_result(ir: &mut DexIrBuilder, return_type: &str) -> Result<(), S
     Ok(())
 }
 
+fn emit_move_result_value(ir: &mut DexIrBuilder, return_type: &str, dst: u8) -> Result<u8, String> {
+    match return_type {
+        "V" => Err("void call cannot be used as a value".to_string()),
+        "J" | "D" => {
+            ir.move_result_wide(dst);
+            Ok(dst)
+        }
+        ret if return_is_object(ret) => {
+            ir.move_result_object(dst);
+            Ok(dst)
+        }
+        "Z" | "B" | "C" | "S" | "I" | "F" => {
+            ir.move_result(dst);
+            Ok(dst)
+        }
+        other => Err(format!("unsupported call return type '{}'", other)),
+    }
+}
+
+fn emit_call_value(
+    ir: &mut DexIrBuilder,
+    stmt: &DslCallStmt,
+    expected_type: &str,
+    dst: u8,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<u8, String> {
+    let class_type = java_class_to_descriptor(&stmt.class_name)?;
+    let (params, return_type) = parse_method_signature(&stmt.sig)?;
+    if return_type == "V" {
+        return Err(format!("{}.{}{} returns void and cannot be used as a value", stmt.class_name, stmt.method_name, stmt.sig));
+    }
+    if !value_descriptor_assignable_to(&return_type, expected_type) {
+        return Err(format!(
+            "call expression return type {} cannot be passed as {}",
+            return_type, expected_type
+        ));
+    }
+    if params.len() != stmt.args.len() {
+        return Err(format!(
+            "{}.{}{} expects {} explicit args, got {}",
+            stmt.class_name,
+            stmt.method_name,
+            stmt.sig,
+            params.len(),
+            stmt.args.len()
+        ));
+    }
+    let method = MethodRef::new(
+        class_type.clone(),
+        stmt.method_name.clone(),
+        return_type.clone(),
+        params.clone(),
+    );
+    let receiver = stmt
+        .target
+        .as_ref()
+        .map(|target| resolve_target_reg(target, layout).map(|reg| (reg, class_type.as_str())))
+        .transpose()?;
+    let invoke_kind = match stmt.kind {
+        DslCallKind::Virtual => ManagedInvokeKind::Virtual,
+        DslCallKind::Interface => ManagedInvokeKind::Interface,
+        DslCallKind::Static => ManagedInvokeKind::Static,
+    };
+    emit_invoke_with_values(
+        ir,
+        invoke_kind,
+        method,
+        receiver,
+        &params,
+        &stmt.args,
+        layout,
+        dsl_ctx,
+    )?;
+    emit_move_result_value(ir, &return_type, dst)
+}
+
+fn emit_field_get_value(
+    ir: &mut DexIrBuilder,
+    stmt: &DslFieldStmt,
+    is_static: bool,
+    expected_type: &str,
+    dst: u8,
+    layout: &HelperParamLayout,
+) -> Result<u8, String> {
+    let class_type = java_class_to_descriptor(&stmt.class_name)?;
+    let field_type = java_class_to_descriptor_or_primitive(&stmt.type_name)?;
+    if !value_descriptor_assignable_to(&field_type, expected_type) {
+        return Err(format!(
+            "field expression type {} cannot be passed as {}",
+            field_type, expected_type
+        ));
+    }
+    let field = FieldRef::new(class_type, field_type.clone(), stmt.field_name.clone());
+    let kind = value_kind_from_descriptor(&field_type)?;
+    if is_static {
+        ir.sget(dst, field, kind);
+    } else {
+        let Some(target) = &stmt.target else {
+            return Err("instance field access requires a target".to_string());
+        };
+        let obj = emit_copy_object_if_needed(ir, resolve_target_reg(target, layout)?, REG_TMP1);
+        ir.iget(dst, obj, field, kind);
+    }
+    Ok(dst)
+}
+
+fn emit_cast_value(
+    ir: &mut DexIrBuilder,
+    value: &DslValue,
+    class_name: &str,
+    expected_type: &str,
+    dst: u8,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<u8, String> {
+    let ty = java_class_to_descriptor(class_name)?;
+    if !return_is_object(expected_type) {
+        return Err(format!("cast expression cannot be passed as {}", expected_type));
+    }
+    let src = emit_load_value(ir, value, "Ljava/lang/Object;", dst, layout, dsl_ctx)?;
+    let reg = emit_copy_object_if_needed(ir, src, dst);
+    ir.check_cast(reg, ty);
+    if reg != dst {
+        ir.move_from16(dst, reg as u16, ValueKind::Object);
+    }
+    Ok(dst)
+}
+
 fn emit_load_value(
     ir: &mut DexIrBuilder,
     value: &DslValue,
@@ -1731,6 +1860,13 @@ fn emit_load_value(
             };
             ir.add_int_lit8(temp_reg, src, negated);
             Ok(temp_reg)
+        }
+        DslValue::Call(stmt) => emit_call_value(ir, stmt, expected_type, temp_reg, layout, dsl_ctx),
+        DslValue::FieldGet { stmt, is_static } => {
+            emit_field_get_value(ir, stmt, *is_static, expected_type, temp_reg, layout)
+        }
+        DslValue::Cast { value, class_name } => {
+            emit_cast_value(ir, value, class_name, expected_type, temp_reg, layout, dsl_ctx)
         }
         DslValue::ArrayLength(array) => {
             if expected_type != "I" {
@@ -1802,6 +1938,7 @@ fn resolve_target_reg(target: &DslTarget, layout: &HelperParamLayout) -> Result<
             .copied()
             .ok_or_else(|| format!("argument {} does not exist", index)),
         DslTarget::Last => Ok(REG_LAST_OBJECT),
+        DslTarget::Result => Ok(REG_RESULT),
         DslTarget::Local(name) => layout
             .local_regs
             .get(name)
@@ -1925,10 +2062,21 @@ fn emit_if_null(
 fn infer_cmp_descriptor(value: &DslValue, layout: &HelperParamLayout) -> Option<&'static str> {
     match value {
         DslValue::Int(_) | DslValue::AddLit(_, _) | DslValue::SubLit(_, _) => Some("I"),
+        DslValue::Target(DslTarget::Result) => Some("I"),
         DslValue::Target(DslTarget::Local(name)) => layout
             .local_regs
             .get(name)
             .and_then(|slot| if slot.descriptor == "I" { Some("I") } else { None }),
+        DslValue::Call(stmt) => parse_method_signature(&stmt.sig)
+            .ok()
+            .and_then(|(_, ret)| if ret == "I" { Some("I") } else { None }),
+        DslValue::FieldGet { stmt, .. } => java_class_to_descriptor_or_primitive(&stmt.type_name)
+            .ok()
+            .and_then(|desc| if desc == "I" { Some("I") } else { None }),
+        DslValue::ArrayLength(_) => Some("I"),
+        DslValue::ArrayGet { type_name, .. } => java_class_to_descriptor_or_primitive(type_name)
+            .ok()
+            .and_then(|desc| if desc == "I" { Some("I") } else { None }),
         _ => None,
     }
 }
@@ -2129,6 +2277,24 @@ enum ManagedInvokeKind {
     Static,
 }
 
+fn value_contains_invoke(value: &DslValue) -> bool {
+    match value {
+        DslValue::Call(_) => true,
+        DslValue::AddLit(value, _) | DslValue::SubLit(value, _) | DslValue::ArrayLength(value) => {
+            value_contains_invoke(value)
+        }
+        DslValue::Cast { value, .. } => value_contains_invoke(value),
+        DslValue::ArrayGet { array, index, .. } => {
+            value_contains_invoke(array) || value_contains_invoke(index)
+        }
+        DslValue::FieldGet { .. }
+        | DslValue::Target(_)
+        | DslValue::String(_)
+        | DslValue::Int(_)
+        | DslValue::Null => false,
+    }
+}
+
 fn emit_invoke_with_values(
     ir: &mut DexIrBuilder,
     kind: ManagedInvokeKind,
@@ -2140,6 +2306,9 @@ fn emit_invoke_with_values(
     dsl_ctx: &mut DslBuildContext,
 ) -> Result<(), String> {
     let has_wide = params.iter().any(|param| matches!(param.as_str(), "J" | "D"));
+    if args.iter().any(value_contains_invoke) {
+        return Err("call expressions cannot be nested inside invoke arguments; assign the value with let(...) first".to_string());
+    }
     let mut regs = Vec::new();
     if let Some((receiver_reg, _)) = receiver {
         regs.push(receiver_reg);
@@ -2265,7 +2434,8 @@ fn statements_max_invoke_words(stmts: &[DslStmt]) -> Result<u16, String> {
     let mut max_words = 0u16;
     for stmt in stmts {
         let words = match stmt {
-            DslStmt::New { ctor_sig, .. } => {
+            DslStmt::Let { value, .. } => value_max_invoke_words(value)?,
+            DslStmt::New { ctor_sig, args, .. } => {
                 let params = if let Some(sig) = ctor_sig {
                     let (params, return_type) = parse_method_signature(sig)?;
                     if return_type != "V" {
@@ -2275,42 +2445,100 @@ fn statements_max_invoke_words(stmts: &[DslStmt]) -> Result<u16, String> {
                 } else {
                     Vec::new()
                 };
-                invoke_arg_words(true, &params)?
+                let mut words = invoke_arg_words(true, &params)?;
+                for arg in args {
+                    words = words.max(value_max_invoke_words(arg)?);
+                }
+                words
             }
-            DslStmt::NewArray { .. } => 0,
+            DslStmt::NewArray { size, .. } => value_max_invoke_words(size)?,
             DslStmt::Call(stmt) => {
                 let (params, _) = parse_method_signature(&stmt.sig)?;
-                invoke_arg_words(stmt.target.is_some(), &params)?
+                let mut words = invoke_arg_words(stmt.target.is_some(), &params)?;
+                for arg in &stmt.args {
+                    words = words.max(value_max_invoke_words(arg)?);
+                }
+                words
             }
             DslStmt::IfNull {
+                value,
                 then_stmts,
                 else_stmts,
                 ..
-            } => statements_max_invoke_words(then_stmts)?.max(statements_max_invoke_words(else_stmts)?),
+            } => value_max_invoke_words(value)?
+                .max(statements_max_invoke_words(then_stmts)?)
+                .max(statements_max_invoke_words(else_stmts)?),
             DslStmt::IfCmp {
+                left,
+                right,
                 then_stmts,
                 else_stmts,
                 ..
-            } => statements_max_invoke_words(then_stmts)?.max(statements_max_invoke_words(else_stmts)?),
+            } => value_max_invoke_words(left)?
+                .max(value_max_invoke_words(right)?)
+                .max(statements_max_invoke_words(then_stmts)?)
+                .max(statements_max_invoke_words(else_stmts)?),
             DslStmt::IfInstanceOf {
+                value,
                 then_stmts,
                 else_stmts,
                 ..
-            } => statements_max_invoke_words(then_stmts)?.max(statements_max_invoke_words(else_stmts)?),
-            DslStmt::Let { .. } => 0,
+            } => value_max_invoke_words(value)?
+                .max(statements_max_invoke_words(then_stmts)?)
+                .max(statements_max_invoke_words(else_stmts)?),
+            DslStmt::Cast { value, .. } => value_max_invoke_words(value)?,
+            DslStmt::ArrayLength { array } => value_max_invoke_words(array)?,
+            DslStmt::ArrayGet { array, index, .. } => {
+                value_max_invoke_words(array)?.max(value_max_invoke_words(index)?)
+            }
+            DslStmt::ArrayPut {
+                array,
+                index,
+                value,
+                ..
+            } => value_max_invoke_words(array)?
+                .max(value_max_invoke_words(index)?)
+                .max(value_max_invoke_words(value)?),
+            DslStmt::FieldRead { stmt, .. } => stmt
+                .target
+                .as_ref()
+                .map(|_| 0)
+                .unwrap_or(0),
+            DslStmt::FieldWrite { stmt, .. } => {
+                stmt.value.as_ref().map(value_max_invoke_words).transpose()?.unwrap_or(0)
+            }
             DslStmt::NewLoop { .. }
-            | DslStmt::Cast { .. }
-            | DslStmt::ArrayLength { .. }
-            | DslStmt::ArrayGet { .. }
-            | DslStmt::ArrayPut { .. }
-            | DslStmt::FieldRead { .. }
-            | DslStmt::FieldWrite { .. }
-            | DslStmt::ReturnOrig
-            | DslStmt::ReturnValue { .. } => 0,
+            | DslStmt::ReturnOrig => 0,
+            DslStmt::ReturnValue { value } => value.as_ref().map(value_max_invoke_words).transpose()?.unwrap_or(0),
         };
         max_words = max_words.max(words);
     }
     Ok(max_words)
+}
+
+fn value_max_invoke_words(value: &DslValue) -> Result<u16, String> {
+    match value {
+        DslValue::Call(stmt) => {
+            let (params, _) = parse_method_signature(&stmt.sig)?;
+            let mut words = invoke_arg_words(stmt.target.is_some(), &params)?;
+            for arg in &stmt.args {
+                words = words.max(value_max_invoke_words(arg)?);
+            }
+            Ok(words)
+        }
+        DslValue::AddLit(value, _) | DslValue::SubLit(value, _) | DslValue::ArrayLength(value) => {
+            value_max_invoke_words(value)
+        }
+        DslValue::Cast { value, .. } => value_max_invoke_words(value),
+        DslValue::ArrayGet { array, index, .. } => {
+            Ok(value_max_invoke_words(array)?.max(value_max_invoke_words(index)?))
+        }
+        DslValue::FieldGet { .. }
+        | DslValue::Target(_)
+        | DslValue::String(_)
+        | DslValue::Int(_)
+        | DslValue::Null => Ok(0),
+    }
 }
 
 fn collect_local_slots(program: &DslProgram, first_reg: u16) -> Result<(BTreeMap<String, LocalSlot>, u16), String> {
@@ -2411,10 +2639,18 @@ fn emit_return_value(
             ir.return_void();
         }
         "J" | "D" => {
-            return Err(format!(
-                "direct return for wide type {} is not supported yet; use return orig()",
-                emit_ctx.return_type
-            ));
+            let Some(value) = value else {
+                return Err(format!("method returning {} requires return value", emit_ctx.return_type));
+            };
+            let reg = emit_load_value(
+                ir,
+                value,
+                emit_ctx.return_type,
+                REG_TMP0,
+                emit_ctx.layout,
+                emit_ctx.dsl_ctx,
+            )?;
+            ir.return_wide(reg);
         }
         ret if return_is_object(ret) => {
             let Some(value) = value else {
@@ -2782,6 +3018,12 @@ enum DslValue {
     Null,
     AddLit(Box<DslValue>, i8),
     SubLit(Box<DslValue>, i8),
+    Call(DslCallStmt),
+    FieldGet { stmt: Box<DslFieldStmt>, is_static: bool },
+    Cast {
+        value: Box<DslValue>,
+        class_name: String,
+    },
     ArrayLength(Box<DslValue>),
     ArrayGet {
         array: Box<DslValue>,
@@ -2794,6 +3036,7 @@ enum DslTarget {
     This,
     Arg(usize),
     Last,
+    Result,
     Local(String),
 }
 
@@ -3366,6 +3609,101 @@ impl<'a> DslParser<'a> {
                 } else {
                     DslValue::SubLit(Box::new(base), literal)
                 }
+            } else if ident == "call" || ident == "callVirtual" || ident == "callInterface" {
+                self.skip_ws();
+                self.expect_char('(')?;
+                let kind = if ident == "callInterface" {
+                    DslCallKind::Interface
+                } else {
+                    DslCallKind::Virtual
+                };
+                let target = self.parse_target_arg()?;
+                self.skip_ws();
+                self.expect_char(',')?;
+                let class_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let method_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let sig = self.parse_string_arg()?;
+                let args = self.parse_optional_value_args()?;
+                self.expect_char(')')?;
+                DslValue::Call(DslCallStmt {
+                    kind,
+                    target: Some(target),
+                    class_name,
+                    method_name,
+                    sig,
+                    args,
+                })
+            } else if ident == "callStatic" {
+                self.skip_ws();
+                self.expect_char('(')?;
+                let class_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let method_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let sig = self.parse_string_arg()?;
+                let args = self.parse_optional_value_args()?;
+                self.expect_char(')')?;
+                DslValue::Call(DslCallStmt {
+                    kind: DslCallKind::Static,
+                    target: None,
+                    class_name,
+                    method_name,
+                    sig,
+                    args,
+                })
+            } else if ident == "get" {
+                self.skip_ws();
+                self.expect_char('(')?;
+                let target = self.parse_target_arg()?;
+                self.expect_char(',')?;
+                let class_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let field_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let type_name = self.parse_string_arg()?;
+                self.expect_char(')')?;
+                DslValue::FieldGet {
+                    stmt: Box::new(DslFieldStmt {
+                        target: Some(target),
+                        class_name,
+                        field_name,
+                        type_name,
+                        value: None,
+                    }),
+                    is_static: false,
+                }
+            } else if ident == "getStatic" {
+                self.skip_ws();
+                self.expect_char('(')?;
+                let class_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let field_name = self.parse_string_arg()?;
+                self.expect_char(',')?;
+                let type_name = self.parse_string_arg()?;
+                self.expect_char(')')?;
+                DslValue::FieldGet {
+                    stmt: Box::new(DslFieldStmt {
+                        target: None,
+                        class_name,
+                        field_name,
+                        type_name,
+                        value: None,
+                    }),
+                    is_static: true,
+                }
+            } else if ident == "cast" {
+                self.skip_ws();
+                self.expect_char('(')?;
+                let value = self.parse_value_arg()?;
+                self.expect_char(',')?;
+                let class_name = self.parse_string_arg()?;
+                self.expect_char(')')?;
+                DslValue::Cast {
+                    value: Box::new(value),
+                    class_name,
+                }
             } else if ident == "arrayLength" {
                 self.skip_ws();
                 self.expect_char('(')?;
@@ -3442,6 +3780,7 @@ fn parse_target_name(name: &str) -> Option<DslTarget> {
     match name {
         "this" | "$this" => Some(DslTarget::This),
         "last" | "$last" => Some(DslTarget::Last),
+        "result" | "$result" => Some(DslTarget::Result),
         value if value.starts_with("arg") => value[3..].parse::<usize>().ok().map(DslTarget::Arg),
         value if value.starts_with('$') => value[1..].parse::<usize>().ok().map(DslTarget::Arg),
         value if value.starts_with('p') => value[1..].parse::<usize>().ok().map(DslTarget::Arg),
