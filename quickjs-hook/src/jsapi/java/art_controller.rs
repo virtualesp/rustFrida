@@ -18,6 +18,7 @@
 
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::console::output_verbose;
+use crate::jsapi::module::{libart_dlsym, module_dlsym};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -400,7 +401,11 @@ pub(super) fn ensure_art_controller_initialized(
     output_verbose("[artController] 开始安装三层拦截矩阵...");
 
     // 提前探测 ArtThreadSpec (递归防护 stack check 需要)
-    let _ = get_art_thread_spec(env as JniEnv);
+    if let Some(spec) = get_art_thread_spec(env as JniEnv) {
+        unsafe {
+            install_managed_implicit_suspend_guard(spec);
+        }
+    }
     let _ = get_managed_stack_spec();
 
     // 注意: DeoptimizeBootImage / forced_interpret_only / InvalidateAllMethods 都不自动调用。
@@ -1417,6 +1422,113 @@ static DUMMY_OAT_HEADER_BUF: [u8; 64] = [0u8; 64];
 /// 旧的 SIGSEGV handler (chain 用)
 static mut PREV_SIGSEGV_ACTION: libc::sigaction = unsafe { std::mem::zeroed() };
 static WALKSTACK_GUARD_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+// ============================================================================
+// Managed DSL implicit suspend SIGSEGV fallback
+// ============================================================================
+//
+// ART arm64 quick code implements implicit suspend checks with:
+//   ldr x21, [x21]   // encoding 0xf94002b5
+// The normal ART fault handler rewrites PC to art_quick_implicit_suspend and
+// clears Thread::tlsPtr_.suspend_trigger. On JD, some JIT helper frames can
+// fall through libsigchain to the app crash handler; that handler blocks, so
+// SuspendAll eventually times out. Register as a libsigchain special handler
+// and consume only this exact instruction as a fallback after ART's handler.
+
+const ARM64_IMPLICIT_SUSPEND_CHECK_LDR: u32 = 0xf94002b5;
+const INVALID_THREAD_OFFSET: u64 = u64::MAX;
+
+#[repr(C)]
+struct SigchainAction {
+    sc_sigaction: Option<unsafe extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) -> bool>,
+    sc_mask: libc::sigset_t,
+    sc_flags: u64,
+}
+
+static IMPLICIT_SUSPEND_GUARD_INSTALLED: AtomicBool = AtomicBool::new(false);
+static IMPLICIT_SUSPEND_ENTRYPOINT: AtomicU64 = AtomicU64::new(0);
+static IMPLICIT_SUSPEND_TRIGGER_OFFSET: AtomicU64 = AtomicU64::new(INVALID_THREAD_OFFSET);
+
+unsafe extern "C" fn managed_implicit_suspend_sigsegv_handler(
+    sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    context: *mut libc::c_void,
+) -> bool {
+    if sig != libc::SIGSEGV || info.is_null() || context.is_null() {
+        return false;
+    }
+
+    let entry = IMPLICIT_SUSPEND_ENTRYPOINT.load(Ordering::Relaxed);
+    if entry == 0 {
+        return false;
+    }
+
+    let uc = context as *mut libc::ucontext_t;
+    let mc = &mut (*uc).uc_mcontext;
+    let pc = mc.pc & PAC_STRIP_MASK;
+    if pc == 0 {
+        return false;
+    }
+
+    let inst = core::ptr::read_unaligned(pc as *const u32);
+    if inst != ARM64_IMPLICIT_SUSPEND_CHECK_LDR {
+        return false;
+    }
+
+    let thread = mc.regs[19] & PAC_STRIP_MASK;
+    let offset = IMPLICIT_SUSPEND_TRIGGER_OFFSET.load(Ordering::Relaxed);
+    if thread == 0 || offset == INVALID_THREAD_OFFSET {
+        return false;
+    }
+
+    let suspend_trigger_addr = thread.wrapping_add(offset);
+    core::ptr::write(suspend_trigger_addr as *mut u64, suspend_trigger_addr);
+
+    mc.regs[30] = pc.wrapping_add(4);
+    mc.pc = entry;
+    true
+}
+
+unsafe fn install_managed_implicit_suspend_guard(spec: &ArtThreadSpec) {
+    if IMPLICIT_SUSPEND_GUARD_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let add = module_dlsym("libsigchain.so", "AddSpecialSignalHandlerFn");
+    let ensure_front = module_dlsym("libsigchain.so", "EnsureFrontOfChain");
+    let entry = libart_dlsym("art_quick_implicit_suspend") as u64;
+    if add.is_null() || entry == 0 {
+        output_verbose(&format!(
+            "[artController] implicit suspend guard 跳过: AddSpecialSignalHandlerFn={:#x}, art_quick_implicit_suspend={:#x}",
+            add as u64, entry
+        ));
+        IMPLICIT_SUSPEND_GUARD_INSTALLED.store(false, Ordering::SeqCst);
+        return;
+    }
+
+    IMPLICIT_SUSPEND_ENTRYPOINT.store(entry, Ordering::Relaxed);
+    IMPLICIT_SUSPEND_TRIGGER_OFFSET.store(spec.suspend_trigger_offset as u64, Ordering::Relaxed);
+
+    let mut action: SigchainAction = std::mem::zeroed();
+    action.sc_sigaction = Some(managed_implicit_suspend_sigsegv_handler);
+    libc::sigemptyset(&mut action.sc_mask);
+    action.sc_flags = 0;
+
+    type AddSpecialSignalHandlerFn = unsafe extern "C" fn(libc::c_int, *mut SigchainAction);
+    let add_fn: AddSpecialSignalHandlerFn = std::mem::transmute(add);
+    add_fn(libc::SIGSEGV, &mut action as *mut SigchainAction);
+
+    if !ensure_front.is_null() {
+        type EnsureFrontOfChainFn = unsafe extern "C" fn(libc::c_int);
+        let ensure_front_fn: EnsureFrontOfChainFn = std::mem::transmute(ensure_front);
+        ensure_front_fn(libc::SIGSEGV);
+    }
+
+    output_verbose(&format!(
+        "[artController] implicit suspend guard 已安装: entry={:#x}, suspend_trigger_offset={}",
+        entry, spec.suspend_trigger_offset
+    ));
+}
 
 unsafe extern "C" fn walkstack_sigsegv_handler(
     sig: libc::c_int,

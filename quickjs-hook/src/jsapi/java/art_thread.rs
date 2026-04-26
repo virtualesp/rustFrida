@@ -67,6 +67,7 @@ pub(super) fn get_managed_stack_spec() -> &'static ManagedStackSpec {
 /// 字段含义:
 /// - exception_: 当前线程的 pending exception (mirror::Throwable*)
 /// - managed_stack_: 托管栈（ShadowFrame 链表头）
+/// - suspend_trigger_: 隐式 suspend check 触发页指针
 /// - self_: Thread 自引用指针
 /// - top_handle_scope_: HandleScope 链表头（JNI local/global ref 管理）
 /// - is_exception_reported_offset: API ≤ 22 特有，异常是否已报告给 instrumentation
@@ -74,6 +75,7 @@ pub(super) fn get_managed_stack_spec() -> &'static ManagedStackSpec {
 pub(super) struct ArtThreadSpec {
     pub exception_offset: usize,
     pub managed_stack_offset: usize,
+    pub suspend_trigger_offset: usize,
     pub self_offset: usize,
     pub top_handle_scope_offset: usize,
     /// API ≤ 22: is_exception_reported_to_instrumentation_ 偏移，None 表示不可用
@@ -156,6 +158,7 @@ fn probe_art_thread_spec(env: JniEnv) -> Option<ArtThreadSpec> {
     // API >= 23: exception 在 jni_env 前 6 个指针位
     let mut exception_offset = n - 6 * PTR;
     let mut managed_stack_offset = n - 4 * PTR;
+    let mut suspend_trigger_offset = n - PTR;
     let mut self_offset = n + 2 * PTR;
 
     // API ≤ 22 特有字段（对标 Frida _getArtThreadSpec）
@@ -166,6 +169,7 @@ fn probe_art_thread_spec(env: JniEnv) -> Option<ArtThreadSpec> {
         // Android 5.x: exception 前多了 is_exception_reported_to_instrumentation_
         exception_offset -= PTR;
         managed_stack_offset -= PTR;
+        suspend_trigger_offset -= PTR;
         self_offset -= PTR;
 
         // 对标 Frida: isExceptionReportedOffset = exceptionOffset - pointerSize - (9*8) - (3*4)
@@ -187,11 +191,12 @@ fn probe_art_thread_spec(env: JniEnv) -> Option<ArtThreadSpec> {
     }
 
     output_verbose(&format!(
-        "[art thread] 探测成功 (API {}): exception={}, managed_stack={}, self={}, top_handle_scope={}, \
+        "[art thread] 探测成功 (API {}): exception={}, managed_stack={}, suspend_trigger={}, self={}, top_handle_scope={}, \
          is_exception_reported={:?}, throw_location={:?}",
         api_level,
         exception_offset,
         managed_stack_offset,
+        suspend_trigger_offset,
         self_offset,
         top_handle_scope_offset,
         is_exception_reported_offset,
@@ -201,6 +206,7 @@ fn probe_art_thread_spec(env: JniEnv) -> Option<ArtThreadSpec> {
     Some(ArtThreadSpec {
         exception_offset,
         managed_stack_offset,
+        suspend_trigger_offset,
         self_offset,
         top_handle_scope_offset,
         is_exception_reported_offset,
