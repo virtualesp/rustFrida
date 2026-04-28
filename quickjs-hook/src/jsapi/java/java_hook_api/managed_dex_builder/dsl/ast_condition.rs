@@ -119,3 +119,18 @@ pub(in crate::jsapi::java::java_hook_api::managed_dex_builder) fn fold_ternary(
         },
     }
 }
+
+pub(in crate::jsapi::java::java_hook_api::managed_dex_builder) fn fold_ternary_condition(
+    condition: DslCondition,
+    then_condition: DslCondition,
+    else_condition: DslCondition,
+) -> DslCondition {
+    match condition {
+        DslCondition::Const(true) => then_condition,
+        DslCondition::Const(false) => else_condition,
+        condition => condition_or(
+            condition_and(condition.clone(), then_condition),
+            condition_and(condition_not(condition), else_condition),
+        ),
+    }
+}

@@ -7,6 +7,15 @@ impl<'a> DslParser<'a> {
 
     pub(super) fn parse_if_condition(&mut self) -> Result<DslCondition, String> {
         let checkpoint = self.mark();
+        if let Ok(condition) = self.parse_condition_v2() {
+            self.skip_ws();
+            if self.peek() == Some(')') {
+                return Ok(condition);
+            }
+        }
+        self.restore(checkpoint);
+
+        let checkpoint = self.mark();
         if let Ok(value) = self.parse_value_arg() {
             self.skip_ws();
             if self.peek() == Some(')') {

@@ -26,7 +26,7 @@ impl<'a> DslParser<'a> {
         if !can_start_v2_expr(&stream) {
             return Err(stream.err("expected expression"));
         }
-        let value = match parse_v2_int_binary_expr(&mut stream, &self.local_scopes, 0) {
+        let value = match parse_v2_value_expr(&mut stream, &self.local_scopes) {
             Ok(value) => value,
             Err(err) => {
                 self.pos = start;
@@ -40,6 +40,152 @@ impl<'a> DslParser<'a> {
         self.pos = stream.pos();
         Ok(value)
     }
+
+    pub(super) fn parse_condition_v2(&mut self) -> Result<DslCondition, String> {
+        let start = self.pos;
+        let mut stream = DslTokenStream::new(self.input, &self.tokens, self.pos);
+        let condition = match parse_v2_condition_expr(&mut stream, &self.local_scopes) {
+            Ok(condition) => condition,
+            Err(err) => {
+                self.pos = start;
+                return Err(err);
+            }
+        };
+        self.pos = stream.pos();
+        Ok(condition)
+    }
+}
+
+fn parse_v2_value_expr(
+    stream: &mut DslTokenStream<'_>,
+    local_scopes: &[BTreeMap<String, String>],
+) -> Result<DslValue, String> {
+    let mark = stream.mark();
+    if let Ok(condition) = parse_v2_or_condition(stream, local_scopes) {
+        if stream.consume_char('?') {
+            let then_value = parse_v2_value_expr(stream, local_scopes)?;
+            if !stream.consume_char(':') {
+                return Err(stream.err("expected ':'"));
+            }
+            let else_value = parse_v2_value_expr(stream, local_scopes)?;
+            return Ok(fold_ternary(condition, then_value, else_value));
+        }
+    }
+    stream.restore(mark);
+    parse_v2_int_binary_expr(stream, local_scopes, 0)
+}
+
+fn parse_v2_condition_expr(
+    stream: &mut DslTokenStream<'_>,
+    local_scopes: &[BTreeMap<String, String>],
+) -> Result<DslCondition, String> {
+    let condition = parse_v2_or_condition(stream, local_scopes)?;
+    if stream.consume_char('?') {
+        let then_condition = parse_v2_condition_expr(stream, local_scopes)?;
+        if !stream.consume_char(':') {
+            return Err(stream.err("expected ':'"));
+        }
+        let else_condition = parse_v2_condition_expr(stream, local_scopes)?;
+        return Ok(fold_ternary_condition(condition, then_condition, else_condition));
+    }
+    Ok(condition)
+}
+
+fn parse_v2_or_condition(
+    stream: &mut DslTokenStream<'_>,
+    local_scopes: &[BTreeMap<String, String>],
+) -> Result<DslCondition, String> {
+    let mut condition = parse_v2_and_condition(stream, local_scopes)?;
+    while stream.consume_op("||") {
+        let right = parse_v2_and_condition(stream, local_scopes)?;
+        condition = condition_or(condition, right);
+    }
+    Ok(condition)
+}
+
+fn parse_v2_and_condition(
+    stream: &mut DslTokenStream<'_>,
+    local_scopes: &[BTreeMap<String, String>],
+) -> Result<DslCondition, String> {
+    let mut condition = parse_v2_unary_condition(stream, local_scopes)?;
+    while stream.consume_op("&&") {
+        let right = parse_v2_unary_condition(stream, local_scopes)?;
+        condition = condition_and(condition, right);
+    }
+    Ok(condition)
+}
+
+fn parse_v2_unary_condition(
+    stream: &mut DslTokenStream<'_>,
+    local_scopes: &[BTreeMap<String, String>],
+) -> Result<DslCondition, String> {
+    if stream.consume_char('!') {
+        return Ok(condition_not(parse_v2_unary_condition(stream, local_scopes)?));
+    }
+
+    if stream.peek_char('(') {
+        let mark = stream.mark();
+        stream.consume_char('(');
+        if let Ok(condition) = parse_v2_condition_expr(stream, local_scopes) {
+            if stream.consume_char(')') && !peek_v2_cmp_op(stream) {
+                return Ok(condition);
+            }
+        }
+        stream.restore(mark);
+    }
+
+    parse_v2_condition_leaf(stream, local_scopes)
+}
+
+fn parse_v2_condition_leaf(
+    stream: &mut DslTokenStream<'_>,
+    local_scopes: &[BTreeMap<String, String>],
+) -> Result<DslCondition, String> {
+    let left = parse_v2_int_binary_expr(stream, local_scopes, 0)?;
+    if stream.consume_ident("instanceof") {
+        let class_name = parse_type_name_v2(stream)?;
+        return Ok(DslCondition::InstanceOf {
+            value: left,
+            class_name,
+        });
+    }
+    if !peek_v2_cmp_op(stream) {
+        if let DslValue::Bool(value) = left {
+            return Ok(DslCondition::Const(value));
+        }
+        return Ok(DslCondition::Bool { value: left });
+    }
+    let op = parse_v2_cmp_op(stream)?;
+    let right = parse_v2_int_binary_expr(stream, local_scopes, 0)?;
+    let left_is_null = matches!(left, DslValue::Null);
+    let right_is_null = matches!(right, DslValue::Null);
+    if right_is_null {
+        return match op {
+            IfCmpOp::Eq => Ok(DslCondition::Null {
+                value: left,
+                invert: false,
+            }),
+            IfCmpOp::Ne => Ok(DslCondition::Null {
+                value: left,
+                invert: true,
+            }),
+            _ => Err(stream.err("null condition only supports == and !=")),
+        };
+    }
+    if left_is_null {
+        return match op {
+            IfCmpOp::Eq => Ok(DslCondition::Null {
+                value: right,
+                invert: false,
+            }),
+            IfCmpOp::Ne => Ok(DslCondition::Null {
+                value: right,
+                invert: true,
+            }),
+            _ => Err(stream.err("null condition only supports == and !=")),
+        };
+    }
+    Ok(DslCondition::Cmp { op, left, right })
 }
 
 fn parse_v2_int_binary_expr(
@@ -97,7 +243,7 @@ fn parse_v2_postfix_expr(
                 class_name,
             };
         } else if stream.consume_char('[') {
-            let index = parse_v2_int_binary_expr(stream, local_scopes, 0)?;
+            let index = parse_v2_value_expr(stream, local_scopes)?;
             let type_name = if stream.consume_char(':') {
                 Some(parse_type_name_v2(stream)?)
             } else {
@@ -162,7 +308,7 @@ fn parse_v2_primary_expr(
         }
         Some(DslTokenKind::Symbol('(')) => {
             stream.advance();
-            let value = parse_v2_int_binary_expr(stream, local_scopes, 0)?;
+            let value = parse_v2_value_expr(stream, local_scopes)?;
             if !stream.consume_char(')') {
                 return Err(stream.err("expected ')'"));
             }
@@ -185,7 +331,7 @@ fn parse_v2_new_expr(
         return Err(stream.err("expected '('"));
     }
     if class_name.ends_with("[]") {
-        let size = parse_v2_int_binary_expr(stream, local_scopes, 0)?;
+        let size = parse_v2_value_expr(stream, local_scopes)?;
         if !stream.consume_char(')') {
             return Err(stream.err("expected ')'"));
         }
@@ -330,7 +476,7 @@ fn parse_v2_new_constructor_args(
         let token = if matches!(stream.current_kind(), Some(DslTokenKind::String(_))) {
             NewArgToken::String(stream.parse_string()?)
         } else {
-            NewArgToken::Value(parse_v2_int_binary_expr(stream, local_scopes, 0)?)
+            NewArgToken::Value(parse_v2_value_expr(stream, local_scopes)?)
         };
         tokens.push(token);
         if !stream.consume_char(',') {
@@ -396,7 +542,7 @@ fn parse_v2_array_literal(
         if stream.consume_char(']') {
             return Ok(DslValue::ArrayLiteral { elements });
         }
-        elements.push(parse_v2_int_binary_expr(stream, local_scopes, 0)?);
+        elements.push(parse_v2_value_expr(stream, local_scopes)?);
         if stream.consume_char(',') {
             if stream.consume_char(']') {
                 return Ok(DslValue::ArrayLiteral { elements });
@@ -419,7 +565,7 @@ fn parse_v2_value_arg_list_until_close(
         if stream.peek_char(')') {
             return Ok(args);
         }
-        args.push(parse_v2_int_binary_expr(stream, local_scopes, 0)?);
+        args.push(parse_v2_value_expr(stream, local_scopes)?);
         if !stream.consume_char(',') {
             return Ok(args);
         }
@@ -535,7 +681,7 @@ fn parse_v2_member_call_args(
 
         let mut args = vec![DslValue::String(first)];
         while stream.consume_char(',') {
-            args.push(parse_v2_int_binary_expr(stream, local_scopes, 0)?);
+            args.push(parse_v2_value_expr(stream, local_scopes)?);
         }
         if !stream.consume_char(')') {
             return Err(stream.err("expected ')'"));
@@ -549,7 +695,7 @@ fn parse_v2_member_call_args(
             stream.consume_char(')');
             return Ok(ParsedCallArgs::Direct(args));
         }
-        args.push(parse_v2_int_binary_expr(stream, local_scopes, 0)?);
+        args.push(parse_v2_value_expr(stream, local_scopes)?);
         if !stream.consume_char(',') {
             if !stream.consume_char(')') {
                 return Err(stream.err("expected ')'"));
@@ -565,7 +711,7 @@ fn parse_v2_optional_value_args(
 ) -> Result<Vec<DslValue>, String> {
     let mut args = Vec::new();
     while stream.consume_char(',') {
-        args.push(parse_v2_int_binary_expr(stream, local_scopes, 0)?);
+        args.push(parse_v2_value_expr(stream, local_scopes)?);
     }
     Ok(args)
 }
@@ -845,6 +991,33 @@ fn consume_v2_int_binary_op(stream: &mut DslTokenStream<'_>, op: DslIntBinOp) ->
         }
     }
     Err(stream.err("unsupported integer binary operator"))
+}
+
+fn parse_v2_cmp_op(stream: &mut DslTokenStream<'_>) -> Result<IfCmpOp, String> {
+    if stream.consume_op("==") {
+        Ok(IfCmpOp::Eq)
+    } else if stream.consume_op("!=") {
+        Ok(IfCmpOp::Ne)
+    } else if stream.consume_op("<=") {
+        Ok(IfCmpOp::Le)
+    } else if stream.consume_op(">=") {
+        Ok(IfCmpOp::Ge)
+    } else if stream.consume_char('<') {
+        Ok(IfCmpOp::Lt)
+    } else if stream.consume_char('>') {
+        Ok(IfCmpOp::Gt)
+    } else {
+        Err(stream.err("expected comparison operator"))
+    }
+}
+
+fn peek_v2_cmp_op(stream: &DslTokenStream<'_>) -> bool {
+    stream.peek_op("==")
+        || stream.peek_op("!=")
+        || stream.peek_op("<=")
+        || stream.peek_op(">=")
+        || stream.peek_char('<')
+        || stream.peek_char('>')
 }
 
 fn scoped_target_name_v2(local_scopes: &[BTreeMap<String, String>], name: &str) -> Option<DslTarget> {
