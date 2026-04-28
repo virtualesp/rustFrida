@@ -14,6 +14,7 @@ mod operators;
 mod parser;
 use parser::DslParser;
 mod scope;
+mod statement_tail;
 mod syntax;
 
 mod expr_core;
