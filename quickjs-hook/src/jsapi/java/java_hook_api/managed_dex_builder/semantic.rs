@@ -347,6 +347,57 @@ impl DslSemanticContext {
         self.validate_value_inner(value, false)
     }
 
+    fn validate_value_for_expected(
+        &mut self,
+        value: &DslValue,
+        expected_desc: &str,
+        require_nonnull_receiver: bool,
+    ) -> Result<(), String> {
+        if let DslValue::ArrayLiteral { elements } = value {
+            return self.validate_array_literal_for_expected(elements, expected_desc, require_nonnull_receiver);
+        }
+        self.validate_value_inner(value, require_nonnull_receiver)?;
+        if let Some(value_desc) = self.infer_value_descriptor(value)? {
+            if !value_descriptor_assignable_to(&value_desc, expected_desc) {
+                return Err(format!(
+                    "value type mismatch: cannot assign {} to {}",
+                    value_desc, expected_desc
+                ));
+            }
+        } else if !return_is_object(expected_desc) {
+            return Err(format!(
+                "value type mismatch: cannot assign null/void to {}",
+                expected_desc
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_array_literal_for_expected(
+        &mut self,
+        elements: &[DslValue],
+        expected_desc: &str,
+        require_nonnull_receiver: bool,
+    ) -> Result<(), String> {
+        if !expected_desc.starts_with('[') {
+            return Err(format!("array literal cannot be assigned to {}", expected_desc));
+        }
+        let component_desc = array_component_descriptor(expected_desc)?;
+        for element in elements {
+            if matches!(element, DslValue::Null) {
+                if !return_is_object(&component_desc) {
+                    return Err(format!(
+                        "array literal null element cannot be assigned to {}",
+                        component_desc
+                    ));
+                }
+                continue;
+            }
+            self.validate_value_for_expected(element, &component_desc, require_nonnull_receiver)?;
+        }
+        Ok(())
+    }
+
     fn validate_bool_condition_value(&mut self, value: &DslValue) -> Result<(), String> {
         self.validate_value_inner(value, true)?;
         let Some(desc) = self.infer_value_descriptor(value)? else {
@@ -603,8 +654,8 @@ impl DslSemanticContext {
                 stmt.args.len()
             ));
         }
-        for arg in &stmt.args {
-            self.validate_value_inner(arg, require_nonnull_receiver)?;
+        for (arg, param) in stmt.args.iter().zip(&params) {
+            self.validate_value_for_expected(arg, param, require_nonnull_receiver)?;
         }
         Ok(())
     }
@@ -642,7 +693,7 @@ impl DslSemanticContext {
         }
         let descriptor = self.resolve_field_descriptor(stmt, is_static)?;
         if let Some(value) = &stmt.value {
-            self.validate_value(value)?;
+            self.validate_value_for_expected(value, &descriptor, false)?;
             if let Some(value_desc) = self.infer_value_descriptor(value)? {
                 if !value_descriptor_assignable_to(&value_desc, &descriptor) {
                     return Err(format!(
@@ -673,7 +724,7 @@ impl DslSemanticContext {
         }
         let expected_descriptors = self.arg_descriptors.clone();
         for (index, (value, expected_desc)) in values.iter().zip(&expected_descriptors).enumerate() {
-            self.validate_value(value)?;
+            self.validate_value_for_expected(value, expected_desc, false)?;
             if let Some(value_desc) = self.infer_value_descriptor(value)? {
                 if !value_descriptor_assignable_to_strict(self.env, &value_desc, expected_desc) {
                     return Err(format!(
@@ -731,9 +782,9 @@ impl DslSemanticContext {
         match stmt {
             DslStmt::Block(stmts) => self.validate_stmts(stmts)?,
             DslStmt::Let { name, type_name, value } => {
-                self.validate_value(value)?;
                 let descriptor = if let Some(type_name) = type_name {
                     let descriptor = java_class_to_descriptor_or_primitive(type_name)?;
+                    self.validate_value_for_expected(value, &descriptor, false)?;
                     if let Some(value_desc) = self.infer_value_descriptor(value)? {
                         if !value_descriptor_assignable_to(&value_desc, &descriptor) {
                             return Err(format!(
@@ -749,6 +800,7 @@ impl DslSemanticContext {
                     }
                     descriptor
                 } else {
+                    self.validate_value(value)?;
                     self.infer_value_descriptor(value)?
                         .ok_or_else(|| format!("local '{}' type cannot be inferred", name))?
                 };
@@ -758,7 +810,7 @@ impl DslSemanticContext {
                 let Some(descriptor) = self.local_descriptors.get(name).cloned() else {
                     return Err(format!("local '{}' is not declared", name));
                 };
-                self.validate_value(value)?;
+                self.validate_value_for_expected(value, &descriptor, false)?;
                 if let Some(value_desc) = self.infer_value_descriptor(value)? {
                     if !value_descriptor_assignable_to(&value_desc, &descriptor) {
                         return Err(format!(
@@ -860,10 +912,15 @@ impl DslSemanticContext {
             } => {
                 self.validate_value(array)?;
                 self.validate_value(index)?;
-                self.validate_value(value)?;
-                if let Some(type_name) = type_name {
-                    java_class_to_descriptor_or_primitive(type_name)?;
-                }
+                let component = if let Some(type_name) = type_name {
+                    java_class_to_descriptor_or_primitive(type_name)?
+                } else {
+                    let array_desc = self
+                        .infer_value_descriptor(array)?
+                        .ok_or_else(|| "array element type cannot be inferred; use arr[index: Type]".to_string())?;
+                    array_component_descriptor(&array_desc)?
+                };
+                self.validate_value_for_expected(value, &component, false)?;
             }
             DslStmt::ArrayUpdate {
                 array,
@@ -1048,7 +1105,8 @@ impl DslSemanticContext {
             DslStmt::ReturnOrig { args } => self.validate_orig_args(args)?,
             DslStmt::ReturnValue { value } => {
                 if let Some(value) = value {
-                    self.validate_value(value)?;
+                    let expected_desc = self.target_return_type.clone();
+                    self.validate_value_for_expected(value, &expected_desc, false)?;
                     if let Some(value_desc) = self.infer_value_descriptor(value)? {
                         if !value_descriptor_assignable_to_strict(self.env, &value_desc, &self.target_return_type) {
                             return Err(format!(

@@ -294,13 +294,14 @@ fn resolve_direct_call_proto(
         declared_matches
     };
 
-    pick_unique_direct_call_sig(class_name, &stmt.method_name, arg_types, matches).and_then(|full_sig| {
+    pick_unique_direct_call_sig(env, class_name, &stmt.method_name, arg_types, matches).and_then(|full_sig| {
         let (params, return_type) = parse_method_signature(&full_sig)?;
         Ok((params, return_type, full_sig))
     })
 }
 
 fn pick_unique_direct_call_sig(
+    env: JniEnv,
     class_name: &str,
     method_name: &str,
     arg_types: &[Option<String>],
@@ -319,18 +320,51 @@ fn pick_unique_direct_call_sig(
         .filter(|(score, _)| *score == best_score)
         .map(|(_, sig)| sig)
         .collect::<BTreeSet<_>>();
-    match best.len() {
-        1 => {
-            let full_sig = best.into_iter().next().unwrap();
-            Ok(full_sig)
-        }
-        _ => Err(format!(
-            "ambiguous overload for {}.{} with inferred argument types {}; use overload(\"...\")",
-            class_name,
-            method_name,
-            format_inferred_arg_types(arg_types)
-        )),
+    if best.len() == 1 {
+        return Ok(best.into_iter().next().unwrap());
     }
+    if let Some(full_sig) = pick_most_specific_direct_call_sig(env, &best) {
+        return Ok(full_sig);
+    }
+    Err(format!(
+        "ambiguous overload for {}.{} with inferred argument types {}; use overload(\"...\")",
+        class_name,
+        method_name,
+        format_inferred_arg_types(arg_types)
+    ))
+}
+
+fn pick_most_specific_direct_call_sig(env: JniEnv, sigs: &BTreeSet<String>) -> Option<String> {
+    let candidates = sigs
+        .iter()
+        .filter_map(|sig| parse_method_signature(sig).ok().map(|(params, _)| (sig, params)))
+        .collect::<Vec<_>>();
+    let mut best = None;
+    for (sig, params) in &candidates {
+        let more_specific_than_all = candidates
+            .iter()
+            .filter(|(other_sig, _)| *other_sig != *sig)
+            .all(|(_, other_params)| params_more_specific(env, params, other_params));
+        if more_specific_than_all {
+            if best.is_some() {
+                return None;
+            }
+            best = Some((*sig).clone());
+        }
+    }
+    best
+}
+
+fn params_more_specific(env: JniEnv, params: &[String], other_params: &[String]) -> bool {
+    params.len() == other_params.len()
+        && params
+            .iter()
+            .zip(other_params)
+            .all(|(param, other)| descriptor_more_specific_or_equal(env, param, other))
+}
+
+fn descriptor_more_specific_or_equal(env: JniEnv, desc: &str, other: &str) -> bool {
+    desc == other || object_assignability_score(env, desc, other).is_some()
 }
 
 fn direct_call_match_score(env: JniEnv, arg_types: &[Option<String>], params: &[String]) -> Option<u16> {

@@ -305,7 +305,10 @@ pub(super) fn object_assignability_score(env: JniEnv, src: &str, dst: &str) -> O
         return None;
     }
     if src.starts_with('[') || dst.starts_with('[') {
-        return array_assignability_score(src, dst);
+        return array_assignability_score(env, src, dst);
+    }
+    if dst == "Ljava/lang/Object;" {
+        return Some(1024);
     }
     if env.is_null() {
         return None;
@@ -533,11 +536,23 @@ unsafe fn class_method_id_from_class_ref(
     }
 }
 
-fn array_assignability_score(src: &str, dst: &str) -> Option<u16> {
+fn array_assignability_score(env: JniEnv, src: &str, dst: &str) -> Option<u16> {
     if src == dst {
         return Some(0);
     }
     if !src.starts_with('[') {
+        return None;
+    }
+    if dst.starts_with('[') {
+        let src_component = array_component_descriptor(src).ok()?;
+        let dst_component = array_component_descriptor(dst).ok()?;
+        if src_component == dst_component {
+            return Some(0);
+        }
+        if return_is_object(&src_component) && return_is_object(&dst_component) {
+            return object_assignability_score(env, &src_component, &dst_component)
+                .map(|score| score.saturating_add(16));
+        }
         return None;
     }
     match dst {
