@@ -1,3 +1,7 @@
 [submodule "quickjs-hook/quickjs-src"]
 	path = quickjs-hook/quickjs-src
 	url = https://github.com/bellard/quickjs.git
+[submodule "quickjs-hook/third_party/tinycc"]
+	path = quickjs-hook/third_party/tinycc
+	url = https://github.com/kkkbbb/tinycc.git
+	branch = rf/cmodule-runtime
