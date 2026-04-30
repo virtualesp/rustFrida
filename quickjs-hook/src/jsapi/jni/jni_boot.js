@@ -94,6 +94,9 @@
         MonitorExit: 218,
         GetJavaVM: 219,
         ExceptionCheck: 228,
+        NewDirectByteBuffer: 229,
+        GetDirectBufferAddress: 230,
+        GetDirectBufferCapacity: 231,
         GetObjectRefType: 232
     });
     var _JNI_NAMES = Object.keys(_JNI_INDEX);
@@ -404,6 +407,31 @@
     }
 
     function _makeEnvHelper() {
+        var getDirectBufferAddressFn = null;
+        var getDirectBufferCapacityFn = null;
+
+        function _getDirectBufferAddressFn(env) {
+            if (getDirectBufferAddressFn === null) {
+                getDirectBufferAddressFn = new NativeFunction(
+                    _getAddressByIndex(env, _JNI_INDEX.GetDirectBufferAddress),
+                    "pointer",
+                    ["pointer", "pointer"]
+                );
+            }
+            return getDirectBufferAddressFn;
+        }
+
+        function _getDirectBufferCapacityFn(env) {
+            if (getDirectBufferCapacityFn === null) {
+                getDirectBufferCapacityFn = new NativeFunction(
+                    _getAddressByIndex(env, _JNI_INDEX.GetDirectBufferCapacity),
+                    "int64",
+                    ["pointer", "pointer"]
+                );
+            }
+            return getDirectBufferCapacityFn;
+        }
+
         return {
             get ptr() {
                 return _getCurrentThreadEnv();
@@ -497,6 +525,18 @@
                     return null;
                 }
                 return _api._getObjectClassName(resolved.env, obj);
+            },
+            getDirectBufferAddress: function(envOrBuffer, maybeBuffer) {
+                var resolved = _resolveEnvAndRef.apply(null, arguments);
+                var raw = _getDirectBufferAddressFn(resolved.env)(resolved.env, resolved.ref);
+                if (raw === null || raw === undefined) {
+                    return null;
+                }
+                return _toPtr(raw);
+            },
+            getDirectBufferCapacity: function(envOrBuffer, maybeBuffer) {
+                var resolved = _resolveEnvAndRef.apply(null, arguments);
+                return _getDirectBufferCapacityFn(resolved.env)(resolved.env, resolved.ref);
             }
         };
     }

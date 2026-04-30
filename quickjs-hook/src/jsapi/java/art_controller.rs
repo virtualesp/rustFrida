@@ -500,6 +500,15 @@ unsafe impl Sync for ArtControllerState {}
 ///
 /// 使用 Mutex<Option<_>> 而不是 OnceLock，这样 cleanup 后可以在新的 JS 引擎生命周期中重新初始化。
 static ART_CONTROLLER: Mutex<Option<ArtControllerState>> = Mutex::new(None);
+static ART_CONTROLLER_RELOAD_PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_art_controller_reload_paused(paused: bool) {
+    ART_CONTROLLER_RELOAD_PAUSED.store(paused, Ordering::Release);
+}
+
+fn art_controller_reload_paused() -> bool {
+    ART_CONTROLLER_RELOAD_PAUSED.load(Ordering::Acquire)
+}
 
 // ============================================================================
 // 初始化
@@ -1004,6 +1013,9 @@ pub(super) static GET_OAT_HOOK_POOL_LAST_PC: AtomicU64 = AtomicU64::new(0);
 /// 包含递归防护: 如果当前栈帧来自 callOriginal (managedStack 中已有 replacement)，
 /// 则跳过替换，让 original method 正常执行，防止无限递归。
 unsafe extern "C" fn on_do_call_enter(ctx_ptr: *mut hook_ffi::HookContext, _user_data: *mut std::ffi::c_void) {
+    if art_controller_reload_paused() {
+        return;
+    }
     if ctx_ptr.is_null() {
         return;
     }
@@ -1191,6 +1203,9 @@ pub(crate) fn get_interpreter_bridge() -> u64 {
 /// 返回 1 = 正常路由到 replacement，返回 0 = 跳过（callOriginal bypass 或 stack 递归 或 JS engine 繁忙）。
 #[no_mangle]
 pub unsafe extern "C" fn art_router_stack_check(replacement: u64) -> i32 {
+    if art_controller_reload_paused() {
+        return 0;
+    }
     let original_for_quick = hook_ffi::hook_art_router_table_lookup_original(replacement);
     if original_for_quick != 0 && crate::fast_hook::is_fast_hook(original_for_quick) {
         let stack = get_bypass_stack();
@@ -1328,11 +1343,17 @@ unsafe extern "C" fn on_pretty_method_enter(ctx_ptr: *mut hook_ffi::HookContext,
 
 /// GC / FixupStaticTrampolines on_leave 回调: 调用同步函数
 unsafe extern "C" fn on_gc_sync_leave(_ctx_ptr: *mut hook_ffi::HookContext, _user_data: *mut std::ffi::c_void) {
+    if art_controller_reload_paused() {
+        return;
+    }
     synchronize_replacement_methods();
 }
 
 /// RunFlipFunction on_enter 回调: 线程翻转期间同步
 unsafe extern "C" fn on_gc_sync_enter(_ctx_ptr: *mut hook_ffi::HookContext, _user_data: *mut std::ffi::c_void) {
+    if art_controller_reload_paused() {
+        return;
+    }
     synchronize_replacement_methods();
 }
 

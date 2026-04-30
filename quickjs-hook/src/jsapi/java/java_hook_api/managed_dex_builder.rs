@@ -91,6 +91,7 @@ pub(super) struct GeneratedManagedDex {
     pub counters: Vec<GeneratedCounter>,
     pub message_channels: Vec<GeneratedMessageChannel>,
     pub message_capacity: i32,
+    pub uses_direct_buffer_helpers: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -746,6 +747,55 @@ pub(super) unsafe fn build_managed_dsl_dex(
             build_message_send_string_code(&generated_type, message_capacity)?,
         );
     }
+    if dsl_ctx.uses_direct_buffer_helpers {
+        class.native_direct_method(
+            "__rf_dbb_fill",
+            "I",
+            vec![
+                "Ljava/nio/ByteBuffer;".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+            ],
+            ACC_PUBLIC | ACC_STATIC | ACC_NATIVE | ACC_SYNTHETIC,
+        );
+        class.native_direct_method(
+            "__rf_dbb_copy_from_byte_array",
+            "I",
+            vec![
+                "Ljava/nio/ByteBuffer;".to_string(),
+                "I".to_string(),
+                "[B".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+            ],
+            ACC_PUBLIC | ACC_STATIC | ACC_NATIVE | ACC_SYNTHETIC,
+        );
+        class.native_direct_method(
+            "__rf_dbb_copy_to_byte_array",
+            "I",
+            vec![
+                "Ljava/nio/ByteBuffer;".to_string(),
+                "I".to_string(),
+                "[B".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+            ],
+            ACC_PUBLIC | ACC_STATIC | ACC_NATIVE | ACC_SYNTHETIC,
+        );
+        class.native_direct_method(
+            "__rf_dbb_capacity",
+            "I",
+            vec!["Ljava/nio/ByteBuffer;".to_string()],
+            ACC_PUBLIC | ACC_STATIC | ACC_NATIVE | ACC_SYNTHETIC,
+        );
+        class.native_direct_method(
+            "__rf_dbb_get_u8",
+            "I",
+            vec!["Ljava/nio/ByteBuffer;".to_string(), "I".to_string()],
+            ACC_PUBLIC | ACC_STATIC | ACC_NATIVE | ACC_SYNTHETIC,
+        );
+    }
     class.direct_method(
         "hook",
         &return_type,
@@ -783,6 +833,7 @@ pub(super) unsafe fn build_managed_dsl_dex(
         counters: dsl_ctx.counters,
         message_channels: dsl_ctx.message_channels,
         message_capacity,
+        uses_direct_buffer_helpers: dsl_ctx.uses_direct_buffer_helpers,
     })
 }
 

@@ -25,6 +25,13 @@ pub(in crate::jsapi::java::java_hook_api::managed_dex_builder) enum DslValue {
         else_value: Box<DslValue>,
     },
     OrigCall(DslOrigArgs),
+    DirectBufferCapacity {
+        buffer: Box<DslValue>,
+    },
+    DirectBufferGetU8 {
+        buffer: Box<DslValue>,
+        offset: Box<DslValue>,
+    },
     Call(DslCallStmt),
     NewObject {
         class_name: String,

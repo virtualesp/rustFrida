@@ -46,7 +46,7 @@ pub use jsapi::hook_api::shutdown_qbdi_helper;
 pub use jsapi::hook_api::{cut_native_hooks, free_native_hooks};
 pub use jsapi::java::art_controller::{
     cut_art_controller_hooks, cut_art_controller_routing_hooks, cut_art_controller_walkstack_guards,
-    free_art_controller_state,
+    free_art_controller_state, set_art_controller_reload_paused,
 };
 pub use jsapi::java::cleanup_java_hooks;
 pub use jsapi::java::{cut_java_hooks, drain_thunk_in_flight, free_java_hooks};

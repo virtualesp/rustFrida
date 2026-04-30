@@ -12,7 +12,8 @@ use quickjs_hook::{
     cleanup_engine, cleanup_wxshadow_patches, complete_script, cut_art_controller_routing_hooks,
     cut_art_controller_walkstack_guards, cut_java_hooks, cut_native_hooks, drain_thunk_in_flight,
     free_art_controller_state, free_java_hooks, free_native_hooks, get_or_init_engine, init_hook_engine, load_script,
-    load_script_with_filename, set_console_callback, set_qbdi_helper_blob, set_qbdi_output_dir,
+    load_script_with_filename, set_art_controller_reload_paused, set_console_callback, set_qbdi_helper_blob,
+    set_qbdi_output_dir,
 };
 #[cfg(feature = "qbdi")]
 use quickjs_hook::{preload_qbdi_helper, shutdown_qbdi_helper};
@@ -403,6 +404,8 @@ pub fn cleanup_soft() -> Result<(), String> {
 
     stage("soft cleanup start", &mut t);
     quickjs_hook::recomp::set_cleanup_release_only(false);
+    set_art_controller_reload_paused(true);
+    stage("phase0 pause_art_controller_reload", &mut t);
 
     // Phase 1: 切 JS 侧入口（保留 art_controller routing / walkstack guards）
     cut_java_hooks();
@@ -415,6 +418,7 @@ pub fn cleanup_soft() -> Result<(), String> {
     stage("phase2 drain_thunk_in_flight", &mut t);
 
     if !drained {
+        set_art_controller_reload_paused(false);
         log_msg(format!(
             "[quickjs-soft] drain 未归零：保留 hook 资源 (leak 到进程退出). \
              拒绝降级 (会让醒来的线程 UAF JS callback). total {}ms\n",
@@ -428,6 +432,8 @@ pub fn cleanup_soft() -> Result<(), String> {
     stage("phase3 free_java_hooks", &mut t);
     free_native_hooks();
     stage("phase3 free_native_hooks", &mut t);
+    set_art_controller_reload_paused(false);
+    stage("phase3 resume_art_controller_reload", &mut t);
     ENGINE_INITIALIZED.store(false, Ordering::SeqCst);
     cleanup_engine();
     stage("phase3 cleanup_engine", &mut t);

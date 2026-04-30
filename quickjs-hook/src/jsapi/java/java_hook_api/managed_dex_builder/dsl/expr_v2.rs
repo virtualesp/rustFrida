@@ -292,6 +292,37 @@ fn parse_v2_primary_expr(
                 Ok(DslValue::Target(DslTarget::Local("orig".to_string())))
             }
         }
+        Some(DslTokenKind::Ident(value)) if value == "dbbCapacity" => {
+            stream.advance();
+            if !stream.consume_char('(') {
+                return Err(stream.err("expected '(' after dbbCapacity"));
+            }
+            let buffer = parse_v2_value_expr(stream, local_scopes)?;
+            if !stream.consume_char(')') {
+                return Err(stream.err("expected ')'"));
+            }
+            Ok(DslValue::DirectBufferCapacity {
+                buffer: Box::new(buffer),
+            })
+        }
+        Some(DslTokenKind::Ident(value)) if value == "dbbGetU8" => {
+            stream.advance();
+            if !stream.consume_char('(') {
+                return Err(stream.err("expected '(' after dbbGetU8"));
+            }
+            let buffer = parse_v2_value_expr(stream, local_scopes)?;
+            if !stream.consume_char(',') {
+                return Err(stream.err("expected ','"));
+            }
+            let offset = parse_v2_value_expr(stream, local_scopes)?;
+            if !stream.consume_char(')') {
+                return Err(stream.err("expected ')'"));
+            }
+            Ok(DslValue::DirectBufferGetU8 {
+                buffer: Box::new(buffer),
+                offset: Box::new(offset),
+            })
+        }
         Some(DslTokenKind::Ident(_)) => {
             if let Some(value) = try_parse_v2_static_member_primary(stream, local_scopes)? {
                 return Ok(value);

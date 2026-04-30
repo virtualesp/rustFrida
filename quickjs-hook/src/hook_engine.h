@@ -536,6 +536,9 @@ void* hook_install_managed_direct_entrypoint(void* target,
                                              uint64_t original_method,
                                              int set_orig_bypass);
 
+void* hook_create_managed_orig_stub(uint64_t original_method,
+                                    void* trampoline);
+
 /*
  * Return the generated ART router thunk body for a hooked quickCode target.
  * The returned address is entry_point compatible (fake OAT header lives

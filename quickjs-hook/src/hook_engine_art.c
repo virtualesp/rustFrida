@@ -1808,6 +1808,37 @@ void* hook_install_managed_direct_router(void* target,
     return entry->trampoline;
 }
 
+void* hook_create_managed_orig_stub(uint64_t original_method,
+                                    void* trampoline) {
+    if (!g_engine.initialized || !original_method || !trampoline) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&g_engine.lock);
+    void* stub = hook_alloc(128);
+    if (!stub) {
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    Arm64Writer w;
+    arm64_writer_init(&w, stub, (uint64_t)stub, 128);
+    arm64_writer_put_ldr_reg_u64(&w, ARM64_REG_X0, original_method);
+    arm64_writer_put_ldr_reg_u64(&w, ARM64_REG_X16, (uint64_t)trampoline);
+    arm64_writer_put_br_reg(&w, ARM64_REG_X16);
+    if (arm64_writer_flush(&w) != 0) {
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    size_t size = arm64_writer_offset(&w);
+    hook_flush_cache(stub, size);
+    pthread_mutex_unlock(&g_engine.lock);
+    hook_log("[managed_orig] stub size=%zu original=%llx trampoline=%p stub=%p",
+             size, (unsigned long long)original_method, trampoline, stub);
+    return stub;
+}
+
 void* hook_install_managed_direct_entrypoint(void* target,
                                              void* jni_env,
                                              void** out_resolved_target,

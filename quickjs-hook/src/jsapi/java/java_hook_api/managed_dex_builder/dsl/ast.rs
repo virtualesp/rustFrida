@@ -126,6 +126,26 @@ pub(in crate::jsapi::java::java_hook_api::managed_dex_builder) enum DslStmt {
         name: String,
         value: DslValue,
     },
+    DirectBufferFill {
+        buffer: DslValue,
+        offset: DslValue,
+        length: DslValue,
+        value: DslValue,
+    },
+    DirectBufferCopyFromByteArray {
+        buffer: DslValue,
+        dst_offset: DslValue,
+        src: DslValue,
+        src_offset: DslValue,
+        length: DslValue,
+    },
+    DirectBufferCopyToByteArray {
+        buffer: DslValue,
+        src_offset: DslValue,
+        dst: DslValue,
+        dst_offset: DslValue,
+        length: DslValue,
+    },
     Throw {
         value: DslValue,
     },

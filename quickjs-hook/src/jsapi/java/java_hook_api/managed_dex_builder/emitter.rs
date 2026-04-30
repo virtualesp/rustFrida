@@ -43,6 +43,7 @@ pub(super) struct DslBuildContext {
     pub(super) string_literals: Vec<GeneratedStringLiteral>,
     pub(super) counters: Vec<GeneratedCounter>,
     pub(super) message_channels: Vec<GeneratedMessageChannel>,
+    pub(super) uses_direct_buffer_helpers: bool,
     int_expr_scratch_base: u16,
     int_expr_scratch_count: u16,
     array_literal_scratch_base: u16,
@@ -114,6 +115,7 @@ impl DslBuildContext {
             string_literals: Vec::new(),
             counters: Vec::new(),
             message_channels: Vec::new(),
+            uses_direct_buffer_helpers: false,
             int_expr_scratch_base,
             int_expr_scratch_count,
             array_literal_scratch_base,
@@ -277,6 +279,73 @@ impl DslBuildContext {
         )
     }
 
+    fn direct_buffer_fill_method(&mut self) -> MethodRef {
+        self.uses_direct_buffer_helpers = true;
+        MethodRef::new(
+            self.generated_type.clone(),
+            "__rf_dbb_fill".to_string(),
+            "I".to_string(),
+            vec![
+                "Ljava/nio/ByteBuffer;".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+            ],
+        )
+    }
+
+    fn direct_buffer_copy_from_byte_array_method(&mut self) -> MethodRef {
+        self.uses_direct_buffer_helpers = true;
+        MethodRef::new(
+            self.generated_type.clone(),
+            "__rf_dbb_copy_from_byte_array".to_string(),
+            "I".to_string(),
+            vec![
+                "Ljava/nio/ByteBuffer;".to_string(),
+                "I".to_string(),
+                "[B".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+            ],
+        )
+    }
+
+    fn direct_buffer_copy_to_byte_array_method(&mut self) -> MethodRef {
+        self.uses_direct_buffer_helpers = true;
+        MethodRef::new(
+            self.generated_type.clone(),
+            "__rf_dbb_copy_to_byte_array".to_string(),
+            "I".to_string(),
+            vec![
+                "Ljava/nio/ByteBuffer;".to_string(),
+                "I".to_string(),
+                "[B".to_string(),
+                "I".to_string(),
+                "I".to_string(),
+            ],
+        )
+    }
+
+    fn direct_buffer_capacity_method(&mut self) -> MethodRef {
+        self.uses_direct_buffer_helpers = true;
+        MethodRef::new(
+            self.generated_type.clone(),
+            "__rf_dbb_capacity".to_string(),
+            "I".to_string(),
+            vec!["Ljava/nio/ByteBuffer;".to_string()],
+        )
+    }
+
+    fn direct_buffer_get_u8_method(&mut self) -> MethodRef {
+        self.uses_direct_buffer_helpers = true;
+        MethodRef::new(
+            self.generated_type.clone(),
+            "__rf_dbb_get_u8".to_string(),
+            "I".to_string(),
+            vec!["Ljava/nio/ByteBuffer;".to_string(), "I".to_string()],
+        )
+    }
+
     fn with_target_narrow_type<F>(&mut self, key: DslTargetKey, descriptor: String, f: F) -> Result<bool, String>
     where
         F: FnOnce(&mut Self) -> Result<bool, String>,
@@ -343,6 +412,46 @@ fn collect_stmt_strings(stmts: &[DslStmt], dsl_ctx: &mut DslBuildContext) {
             DslStmt::Send { name, value } => {
                 dsl_ctx.message_channel_code(name);
                 collect_value_strings(value, dsl_ctx);
+            }
+            DslStmt::DirectBufferFill {
+                buffer,
+                offset,
+                length,
+                value,
+            } => {
+                dsl_ctx.uses_direct_buffer_helpers = true;
+                collect_value_strings(buffer, dsl_ctx);
+                collect_value_strings(offset, dsl_ctx);
+                collect_value_strings(length, dsl_ctx);
+                collect_value_strings(value, dsl_ctx);
+            }
+            DslStmt::DirectBufferCopyFromByteArray {
+                buffer,
+                dst_offset,
+                src,
+                src_offset,
+                length,
+            } => {
+                dsl_ctx.uses_direct_buffer_helpers = true;
+                collect_value_strings(buffer, dsl_ctx);
+                collect_value_strings(dst_offset, dsl_ctx);
+                collect_value_strings(src, dsl_ctx);
+                collect_value_strings(src_offset, dsl_ctx);
+                collect_value_strings(length, dsl_ctx);
+            }
+            DslStmt::DirectBufferCopyToByteArray {
+                buffer,
+                src_offset,
+                dst,
+                dst_offset,
+                length,
+            } => {
+                dsl_ctx.uses_direct_buffer_helpers = true;
+                collect_value_strings(buffer, dsl_ctx);
+                collect_value_strings(src_offset, dsl_ctx);
+                collect_value_strings(dst, dsl_ctx);
+                collect_value_strings(dst_offset, dsl_ctx);
+                collect_value_strings(length, dsl_ctx);
             }
             DslStmt::ArrayGet { array, index, .. } => {
                 collect_value_strings(array, dsl_ctx);
@@ -473,6 +582,15 @@ fn collect_value_strings(value: &DslValue, dsl_ctx: &mut DslBuildContext) {
             collect_value_strings(else_value, dsl_ctx);
         }
         DslValue::OrigCall(args) => collect_orig_arg_strings(args, dsl_ctx),
+        DslValue::DirectBufferCapacity { buffer } => {
+            dsl_ctx.uses_direct_buffer_helpers = true;
+            collect_value_strings(buffer, dsl_ctx);
+        }
+        DslValue::DirectBufferGetU8 { buffer, offset } => {
+            dsl_ctx.uses_direct_buffer_helpers = true;
+            collect_value_strings(buffer, dsl_ctx);
+            collect_value_strings(offset, dsl_ctx);
+        }
         DslValue::Call(call) => collect_call_strings(call, dsl_ctx),
         DslValue::NewObject { args, .. } | DslValue::ArrayLiteral { elements: args } => {
             collect_values_strings(args, dsl_ctx)
@@ -996,6 +1114,18 @@ fn emit_load_value(
             dsl_ctx,
         ),
         DslValue::OrigCall(args) => emit_orig_value(ir, args, expected_type, temp_reg, layout, dsl_ctx),
+        DslValue::DirectBufferCapacity { buffer } => {
+            if expected_type != "I" {
+                return Err(format!("dbbCapacity expression cannot be passed as {}", expected_type));
+            }
+            emit_direct_buffer_capacity_value(ir, buffer, temp_reg, layout, dsl_ctx)
+        }
+        DslValue::DirectBufferGetU8 { buffer, offset } => {
+            if expected_type != "I" {
+                return Err(format!("dbbGetU8 expression cannot be passed as {}", expected_type));
+            }
+            emit_direct_buffer_get_u8_value(ir, buffer, offset, temp_reg, layout, dsl_ctx)
+        }
         DslValue::Call(stmt) => emit_call_value(ir, stmt, expected_type, temp_reg, layout, dsl_ctx),
         DslValue::NewObject {
             class_name,
@@ -1532,7 +1662,12 @@ fn infer_value_descriptor(
     match value {
         DslValue::Target(target) => resolve_target_descriptor(target, layout, dsl_ctx).map(Some),
         DslValue::String(_) => Ok(Some("Ljava/lang/String;".to_string())),
-        DslValue::Int(_) | DslValue::ArrayLength(_) => Ok(Some("I".to_string())),
+        DslValue::Int(_)
+        | DslValue::ArrayLength(_)
+        | DslValue::DirectBufferCapacity { .. }
+        | DslValue::DirectBufferGetU8 { .. } => {
+            Ok(Some("I".to_string()))
+        }
         DslValue::IntBinOp { op, left, right } => {
             if *op == DslIntBinOp::Add && is_string_concat_operands(left, right, layout, dsl_ctx)? {
                 return Ok(Some("Ljava/lang/String;".to_string()));
@@ -3091,6 +3226,37 @@ fn stmt_max_invoke_depth(stmt: &DslStmt) -> u16 {
             .max(statements_max_invoke_depth(update_stmts))
             .max(statements_max_invoke_depth(body_stmts)),
         DslStmt::Send { value, .. } => 1 + value_max_invoke_depth(value),
+        DslStmt::DirectBufferFill {
+            buffer,
+            offset,
+            length,
+            value,
+        } => 1 + value_max_invoke_depth(buffer)
+            .max(value_max_invoke_depth(offset))
+            .max(value_max_invoke_depth(length))
+            .max(value_max_invoke_depth(value)),
+        DslStmt::DirectBufferCopyFromByteArray {
+            buffer,
+            dst_offset,
+            src,
+            src_offset,
+            length,
+        } => 1 + value_max_invoke_depth(buffer)
+            .max(value_max_invoke_depth(dst_offset))
+            .max(value_max_invoke_depth(src))
+            .max(value_max_invoke_depth(src_offset))
+            .max(value_max_invoke_depth(length)),
+        DslStmt::DirectBufferCopyToByteArray {
+            buffer,
+            src_offset,
+            dst,
+            dst_offset,
+            length,
+        } => 1 + value_max_invoke_depth(buffer)
+            .max(value_max_invoke_depth(src_offset))
+            .max(value_max_invoke_depth(dst))
+            .max(value_max_invoke_depth(dst_offset))
+            .max(value_max_invoke_depth(length)),
         DslStmt::Break | DslStmt::Continue | DslStmt::Count { .. } => 0,
         DslStmt::ReturnValue { value } => value.as_ref().map(value_max_invoke_depth).unwrap_or(0),
     }
@@ -3125,6 +3291,10 @@ fn value_max_invoke_depth(value: &DslValue) -> u16 {
         DslValue::OrigCall(args) => orig_args_max_invoke_depth(args),
         DslValue::UnaryOp { value, .. } | DslValue::Cast { value, .. } | DslValue::ArrayLength(value) => {
             value_max_invoke_depth(value)
+        }
+        DslValue::DirectBufferCapacity { buffer } => 1 + value_max_invoke_depth(buffer),
+        DslValue::DirectBufferGetU8 { buffer, offset } => {
+            1 + value_max_invoke_depth(buffer).max(value_max_invoke_depth(offset))
         }
         DslValue::IntBinOp { op, left, right } => {
             let nested = value_max_invoke_depth(left).max(value_max_invoke_depth(right));
@@ -3276,6 +3446,37 @@ fn stmt_int_expr_scratch_count(stmt: &DslStmt) -> u16 {
             .max(statements_int_expr_scratch_count(update_stmts))
             .max(statements_int_expr_scratch_count(body_stmts)),
         DslStmt::Send { value, .. } => value_int_expr_scratch_count(value),
+        DslStmt::DirectBufferFill {
+            buffer,
+            offset,
+            length,
+            value,
+        } => value_int_expr_scratch_count(buffer)
+            .max(value_int_expr_scratch_count(offset))
+            .max(value_int_expr_scratch_count(length))
+            .max(value_int_expr_scratch_count(value)),
+        DslStmt::DirectBufferCopyFromByteArray {
+            buffer,
+            dst_offset,
+            src,
+            src_offset,
+            length,
+        } => value_int_expr_scratch_count(buffer)
+            .max(value_int_expr_scratch_count(dst_offset))
+            .max(value_int_expr_scratch_count(src))
+            .max(value_int_expr_scratch_count(src_offset))
+            .max(value_int_expr_scratch_count(length)),
+        DslStmt::DirectBufferCopyToByteArray {
+            buffer,
+            src_offset,
+            dst,
+            dst_offset,
+            length,
+        } => value_int_expr_scratch_count(buffer)
+            .max(value_int_expr_scratch_count(src_offset))
+            .max(value_int_expr_scratch_count(dst))
+            .max(value_int_expr_scratch_count(dst_offset))
+            .max(value_int_expr_scratch_count(length)),
         DslStmt::Break | DslStmt::Continue | DslStmt::Count { .. } => 0,
         DslStmt::ReturnValue { value } => value.as_ref().map(value_int_expr_scratch_count).unwrap_or(0),
         DslStmt::Throw { value } => value_int_expr_scratch_count(value),
@@ -3323,7 +3524,12 @@ fn value_int_expr_scratch_count(value: &DslValue) -> u16 {
         } => condition_int_expr_scratch_count(condition)
             .max(value_int_expr_scratch_count(then_value))
             .max(value_int_expr_scratch_count(else_value)),
-        DslValue::Cast { value, .. } | DslValue::ArrayLength(value) => value_int_expr_scratch_count(value),
+        DslValue::Cast { value, .. }
+        | DslValue::ArrayLength(value)
+        | DslValue::DirectBufferCapacity { buffer: value } => value_int_expr_scratch_count(value),
+        DslValue::DirectBufferGetU8 { buffer, offset } => {
+            value_int_expr_scratch_count(buffer).max(value_int_expr_scratch_count(offset))
+        }
         DslValue::ArrayGet { array, index, .. } => {
             value_int_expr_scratch_count(array).max(value_int_expr_scratch_count(index))
         }
@@ -3455,6 +3661,37 @@ fn stmt_array_literal_scratch_count(stmt: &DslStmt) -> u16 {
             .max(statements_array_literal_scratch_count(update_stmts))
             .max(statements_array_literal_scratch_count(body_stmts)),
         DslStmt::Send { value, .. } => value_array_literal_scratch_count(value),
+        DslStmt::DirectBufferFill {
+            buffer,
+            offset,
+            length,
+            value,
+        } => value_array_literal_scratch_count(buffer)
+            .max(value_array_literal_scratch_count(offset))
+            .max(value_array_literal_scratch_count(length))
+            .max(value_array_literal_scratch_count(value)),
+        DslStmt::DirectBufferCopyFromByteArray {
+            buffer,
+            dst_offset,
+            src,
+            src_offset,
+            length,
+        } => value_array_literal_scratch_count(buffer)
+            .max(value_array_literal_scratch_count(dst_offset))
+            .max(value_array_literal_scratch_count(src))
+            .max(value_array_literal_scratch_count(src_offset))
+            .max(value_array_literal_scratch_count(length)),
+        DslStmt::DirectBufferCopyToByteArray {
+            buffer,
+            src_offset,
+            dst,
+            dst_offset,
+            length,
+        } => value_array_literal_scratch_count(buffer)
+            .max(value_array_literal_scratch_count(src_offset))
+            .max(value_array_literal_scratch_count(dst))
+            .max(value_array_literal_scratch_count(dst_offset))
+            .max(value_array_literal_scratch_count(length)),
         DslStmt::Break | DslStmt::Continue | DslStmt::Count { .. } => 0,
         DslStmt::ReturnValue { value } => value.as_ref().map(value_array_literal_scratch_count).unwrap_or(0),
     }
@@ -3490,8 +3727,12 @@ fn values_array_literal_scratch_count(values: &[DslValue]) -> u16 {
 fn value_array_literal_scratch_count(value: &DslValue) -> u16 {
     match value {
         DslValue::ArrayLiteral { elements } => 1 + values_array_literal_scratch_count(elements),
-        DslValue::UnaryOp { value, .. } | DslValue::Cast { value, .. } | DslValue::ArrayLength(value) => {
-            value_array_literal_scratch_count(value)
+        DslValue::UnaryOp { value, .. }
+        | DslValue::Cast { value, .. }
+        | DslValue::ArrayLength(value)
+        | DslValue::DirectBufferCapacity { buffer: value } => value_array_literal_scratch_count(value),
+        DslValue::DirectBufferGetU8 { buffer, offset } => {
+            value_array_literal_scratch_count(buffer).max(value_array_literal_scratch_count(offset))
         }
         DslValue::IntBinOp { left, right, .. } => {
             value_array_literal_scratch_count(left).max(value_array_literal_scratch_count(right))
@@ -3671,6 +3912,40 @@ fn statements_max_invoke_words(stmts: &[DslStmt], target_params: &[String], is_s
                 .unwrap_or(0)
                 .max(value_max_invoke_words(value)?),
             DslStmt::Send { value, .. } => 2u16.max(value_max_invoke_words(value)?),
+            DslStmt::DirectBufferFill {
+                buffer,
+                offset,
+                length,
+                value,
+            } => 4u16
+                .max(value_max_invoke_words(buffer)?)
+                .max(value_max_invoke_words(offset)?)
+                .max(value_max_invoke_words(length)?)
+                .max(value_max_invoke_words(value)?),
+            DslStmt::DirectBufferCopyFromByteArray {
+                buffer,
+                dst_offset,
+                src,
+                src_offset,
+                length,
+            } => 5u16
+                .max(value_max_invoke_words(buffer)?)
+                .max(value_max_invoke_words(dst_offset)?)
+                .max(value_max_invoke_words(src)?)
+                .max(value_max_invoke_words(src_offset)?)
+                .max(value_max_invoke_words(length)?),
+            DslStmt::DirectBufferCopyToByteArray {
+                buffer,
+                src_offset,
+                dst,
+                dst_offset,
+                length,
+            } => 5u16
+                .max(value_max_invoke_words(buffer)?)
+                .max(value_max_invoke_words(src_offset)?)
+                .max(value_max_invoke_words(dst)?)
+                .max(value_max_invoke_words(dst_offset)?)
+                .max(value_max_invoke_words(length)?),
             DslStmt::Break | DslStmt::Continue | DslStmt::Count { .. } => 0,
             DslStmt::ReturnOrig { args } => orig_args_max_invoke_words(args, target_params, is_static)?,
             DslStmt::ReturnValue { value } => value.as_ref().map(value_max_invoke_words).transpose()?.unwrap_or(0),
@@ -3731,6 +4006,10 @@ fn value_max_invoke_words(value: &DslValue) -> Result<u16, String> {
             .max(value_max_invoke_words(then_value)?)
             .max(value_max_invoke_words(else_value)?)),
         DslValue::Cast { value, .. } => value_max_invoke_words(value),
+        DslValue::DirectBufferCapacity { buffer } => Ok(1u16.max(value_max_invoke_words(buffer)?)),
+        DslValue::DirectBufferGetU8 { buffer, offset } => Ok(2u16
+            .max(value_max_invoke_words(buffer)?)
+            .max(value_max_invoke_words(offset)?)),
         DslValue::ArrayGet { array, index, .. } => {
             Ok(value_max_invoke_words(array)?.max(value_max_invoke_words(index)?))
         }
@@ -3902,6 +4181,43 @@ fn stmt_uses_orig(stmt: &DslStmt) -> bool {
                 || statements_use_orig(body_stmts)
         }
         DslStmt::Send { value, .. } => value_uses_orig(value),
+        DslStmt::DirectBufferFill {
+            buffer,
+            offset,
+            length,
+            value,
+        } => {
+            value_uses_orig(buffer)
+                || value_uses_orig(offset)
+                || value_uses_orig(length)
+                || value_uses_orig(value)
+        }
+        DslStmt::DirectBufferCopyFromByteArray {
+            buffer,
+            dst_offset,
+            src,
+            src_offset,
+            length,
+        } => {
+            value_uses_orig(buffer)
+                || value_uses_orig(dst_offset)
+                || value_uses_orig(src)
+                || value_uses_orig(src_offset)
+                || value_uses_orig(length)
+        }
+        DslStmt::DirectBufferCopyToByteArray {
+            buffer,
+            src_offset,
+            dst,
+            dst_offset,
+            length,
+        } => {
+            value_uses_orig(buffer)
+                || value_uses_orig(src_offset)
+                || value_uses_orig(dst)
+                || value_uses_orig(dst_offset)
+                || value_uses_orig(length)
+        }
         DslStmt::Break | DslStmt::Continue | DslStmt::Count { .. } => false,
         DslStmt::ReturnValue { value } => value.as_ref().map(value_uses_orig).unwrap_or(false),
     }
@@ -3919,9 +4235,11 @@ fn call_stmt_uses_orig(stmt: &DslCallStmt) -> bool {
 fn value_uses_orig(value: &DslValue) -> bool {
     match value {
         DslValue::OrigCall(_) => true,
-        DslValue::UnaryOp { value, .. } | DslValue::Cast { value, .. } | DslValue::ArrayLength(value) => {
-            value_uses_orig(value)
-        }
+        DslValue::UnaryOp { value, .. }
+        | DslValue::Cast { value, .. }
+        | DslValue::ArrayLength(value)
+        | DslValue::DirectBufferCapacity { buffer: value } => value_uses_orig(value),
+        DslValue::DirectBufferGetU8 { buffer, offset } => value_uses_orig(buffer) || value_uses_orig(offset),
         DslValue::IntBinOp { left, right, .. } => value_uses_orig(left) || value_uses_orig(right),
         DslValue::Ternary {
             condition,
@@ -4305,6 +4623,148 @@ fn emit_send(
     Ok(())
 }
 
+fn emit_direct_buffer_fill(
+    ir: &mut DexIrBuilder,
+    buffer: &DslValue,
+    offset: &DslValue,
+    length: &DslValue,
+    value: &DslValue,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<(), String> {
+    let method = dsl_ctx.direct_buffer_fill_method();
+    emit_invoke_with_values(
+        ir,
+        ManagedInvokeKind::Static,
+        method,
+        None,
+        &[
+            "Ljava/nio/ByteBuffer;".to_string(),
+            "I".to_string(),
+            "I".to_string(),
+            "I".to_string(),
+        ],
+        &[buffer.clone(), offset.clone(), length.clone(), value.clone()],
+        layout,
+        dsl_ctx,
+    )
+}
+
+fn emit_direct_buffer_copy_from_byte_array(
+    ir: &mut DexIrBuilder,
+    buffer: &DslValue,
+    dst_offset: &DslValue,
+    src: &DslValue,
+    src_offset: &DslValue,
+    length: &DslValue,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<(), String> {
+    let method = dsl_ctx.direct_buffer_copy_from_byte_array_method();
+    emit_invoke_with_values(
+        ir,
+        ManagedInvokeKind::Static,
+        method,
+        None,
+        &[
+            "Ljava/nio/ByteBuffer;".to_string(),
+            "I".to_string(),
+            "[B".to_string(),
+            "I".to_string(),
+            "I".to_string(),
+        ],
+        &[
+            buffer.clone(),
+            dst_offset.clone(),
+            src.clone(),
+            src_offset.clone(),
+            length.clone(),
+        ],
+        layout,
+        dsl_ctx,
+    )
+}
+
+fn emit_direct_buffer_copy_to_byte_array(
+    ir: &mut DexIrBuilder,
+    buffer: &DslValue,
+    src_offset: &DslValue,
+    dst: &DslValue,
+    dst_offset: &DslValue,
+    length: &DslValue,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<(), String> {
+    let method = dsl_ctx.direct_buffer_copy_to_byte_array_method();
+    emit_invoke_with_values(
+        ir,
+        ManagedInvokeKind::Static,
+        method,
+        None,
+        &[
+            "Ljava/nio/ByteBuffer;".to_string(),
+            "I".to_string(),
+            "[B".to_string(),
+            "I".to_string(),
+            "I".to_string(),
+        ],
+        &[
+            buffer.clone(),
+            src_offset.clone(),
+            dst.clone(),
+            dst_offset.clone(),
+            length.clone(),
+        ],
+        layout,
+        dsl_ctx,
+    )
+}
+
+fn emit_direct_buffer_capacity_value(
+    ir: &mut DexIrBuilder,
+    buffer: &DslValue,
+    dst: u8,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<u8, String> {
+    let method = dsl_ctx.direct_buffer_capacity_method();
+    emit_invoke_with_values(
+        ir,
+        ManagedInvokeKind::Static,
+        method,
+        None,
+        &["Ljava/nio/ByteBuffer;".to_string()],
+        &[(*buffer).clone()],
+        layout,
+        dsl_ctx,
+    )?;
+    ir.move_result(dst);
+    Ok(dst)
+}
+
+fn emit_direct_buffer_get_u8_value(
+    ir: &mut DexIrBuilder,
+    buffer: &DslValue,
+    offset: &DslValue,
+    dst: u8,
+    layout: &HelperParamLayout,
+    dsl_ctx: &mut DslBuildContext,
+) -> Result<u8, String> {
+    let method = dsl_ctx.direct_buffer_get_u8_method();
+    emit_invoke_with_values(
+        ir,
+        ManagedInvokeKind::Static,
+        method,
+        None,
+        &["Ljava/nio/ByteBuffer;".to_string(), "I".to_string()],
+        &[buffer.clone(), offset.clone()],
+        layout,
+        dsl_ctx,
+    )?;
+    ir.move_result(dst);
+    Ok(dst)
+}
+
 fn emit_statement(ir: &mut DexIrBuilder, stmt: &DslStmt, emit_ctx: &mut EmitContext<'_>) -> Result<bool, String> {
     match stmt {
         DslStmt::Block(stmts) => emit_statements(ir, stmts, emit_ctx),
@@ -4491,6 +4951,61 @@ fn emit_statement(ir: &mut DexIrBuilder, stmt: &DslStmt, emit_ctx: &mut EmitCont
         }
         DslStmt::Send { name, value } => {
             emit_send(ir, name, value, emit_ctx.layout, emit_ctx.dsl_ctx)?;
+            Ok(false)
+        }
+        DslStmt::DirectBufferFill {
+            buffer,
+            offset,
+            length,
+            value,
+        } => {
+            emit_direct_buffer_fill(
+                ir,
+                buffer,
+                offset,
+                length,
+                value,
+                emit_ctx.layout,
+                emit_ctx.dsl_ctx,
+            )?;
+            Ok(false)
+        }
+        DslStmt::DirectBufferCopyFromByteArray {
+            buffer,
+            dst_offset,
+            src,
+            src_offset,
+            length,
+        } => {
+            emit_direct_buffer_copy_from_byte_array(
+                ir,
+                buffer,
+                dst_offset,
+                src,
+                src_offset,
+                length,
+                emit_ctx.layout,
+                emit_ctx.dsl_ctx,
+            )?;
+            Ok(false)
+        }
+        DslStmt::DirectBufferCopyToByteArray {
+            buffer,
+            src_offset,
+            dst,
+            dst_offset,
+            length,
+        } => {
+            emit_direct_buffer_copy_to_byte_array(
+                ir,
+                buffer,
+                src_offset,
+                dst,
+                dst_offset,
+                length,
+                emit_ctx.layout,
+                emit_ctx.dsl_ctx,
+            )?;
             Ok(false)
         }
         DslStmt::ReturnOrig { args } => {

@@ -171,6 +171,28 @@ impl DslSemanticContext {
         Ok(descriptor_is_string(left_desc.as_deref()) || descriptor_is_string(right_desc.as_deref()))
     }
 
+    fn validate_int_arg(&mut self, value: &DslValue, label: &str) -> Result<(), String> {
+        self.validate_value_inner(value, false)?;
+        let Some(desc) = self.infer_value_descriptor(value)? else {
+            return Err(format!("{} cannot be null/void", label));
+        };
+        if !value_assignable_to_descriptor(value, &desc, "I") {
+            return Err(format!("{} must be int, got {}", label, desc));
+        }
+        Ok(())
+    }
+
+    fn validate_direct_buffer_arg(&mut self, value: &DslValue, label: &str) -> Result<(), String> {
+        self.validate_value_inner(value, false)?;
+        let Some(desc) = self.infer_value_descriptor(value)? else {
+            return Err(format!("{} cannot be null/void", label));
+        };
+        if !value_assignable_to_descriptor_strict(self.env, value, &desc, "Ljava/nio/ByteBuffer;") {
+            return Err(format!("{} must be java.nio.ByteBuffer, got {}", label, desc));
+        }
+        Ok(())
+    }
+
     fn resolve_target_descriptor(&self, target: &DslTarget) -> Result<String, String> {
         if let Some(key) = dsl_target_key(target) {
             if let Some(Some(desc)) = self.target_narrow_types.get(&key) {
@@ -241,7 +263,12 @@ impl DslSemanticContext {
         match value {
             DslValue::Target(target) => self.resolve_target_descriptor(target).map(Some),
             DslValue::String(_) => Ok(Some("Ljava/lang/String;".to_string())),
-            DslValue::Int(_) | DslValue::ArrayLength(_) => Ok(Some("I".to_string())),
+            DslValue::Int(_)
+            | DslValue::ArrayLength(_)
+            | DslValue::DirectBufferCapacity { .. }
+            | DslValue::DirectBufferGetU8 { .. } => {
+                Ok(Some("I".to_string()))
+            }
             DslValue::IntBinOp { op, left, right } => {
                 if *op == DslIntBinOp::Add {
                     let left_desc = self.infer_value_descriptor(left)?;
@@ -495,6 +522,27 @@ impl DslSemanticContext {
                     ctx.validate_value_inner(else_value, require_nonnull_receiver)
                 })?;
                 let _ = self.infer_value_descriptor(value)?;
+            }
+            DslValue::DirectBufferCapacity { buffer } => {
+                self.validate_value_inner(buffer, require_nonnull_receiver)?;
+                let Some(buffer_desc) = self.infer_value_descriptor(buffer)? else {
+                    return Err("dbbCapacity() buffer cannot be null/void".to_string());
+                };
+                if !value_assignable_to_descriptor_strict(
+                    self.env,
+                    buffer,
+                    &buffer_desc,
+                    "Ljava/nio/ByteBuffer;",
+                ) {
+                    return Err(format!(
+                        "dbbCapacity() buffer must be java.nio.ByteBuffer, got {}",
+                        buffer_desc
+                    ));
+                }
+            }
+            DslValue::DirectBufferGetU8 { buffer, offset } => {
+                self.validate_direct_buffer_arg(buffer, "dbbGetU8() buffer")?;
+                self.validate_int_arg(offset, "dbbGetU8() offset")?;
             }
             DslValue::Cast { value, class_name } => {
                 self.validate_value_inner(value, require_nonnull_receiver)?;
@@ -1126,6 +1174,58 @@ impl DslSemanticContext {
                         value_desc
                     ));
                 }
+            }
+            DslStmt::DirectBufferFill {
+                buffer,
+                offset,
+                length,
+                value,
+            } => {
+                self.validate_direct_buffer_arg(buffer, "dbbFill() buffer")?;
+                self.validate_int_arg(offset, "dbbFill() offset")?;
+                self.validate_int_arg(length, "dbbFill() length")?;
+                self.validate_int_arg(value, "dbbFill() value")?;
+            }
+            DslStmt::DirectBufferCopyFromByteArray {
+                buffer,
+                dst_offset,
+                src,
+                src_offset,
+                length,
+            } => {
+                self.validate_direct_buffer_arg(buffer, "dbbCopyFromByteArray() buffer")?;
+                self.validate_int_arg(dst_offset, "dbbCopyFromByteArray() dstOffset")?;
+                self.validate_value_inner(src, false)?;
+                let Some(src_desc) = self.infer_value_descriptor(src)? else {
+                    return Err("dbbCopyFromByteArray() src cannot be null/void".to_string());
+                };
+                if src_desc != "[B" {
+                    return Err(format!(
+                        "dbbCopyFromByteArray() src must be byte[], got {}",
+                        src_desc
+                    ));
+                }
+                self.validate_int_arg(src_offset, "dbbCopyFromByteArray() srcOffset")?;
+                self.validate_int_arg(length, "dbbCopyFromByteArray() length")?;
+            }
+            DslStmt::DirectBufferCopyToByteArray {
+                buffer,
+                src_offset,
+                dst,
+                dst_offset,
+                length,
+            } => {
+                self.validate_direct_buffer_arg(buffer, "dbbCopyToByteArray() buffer")?;
+                self.validate_int_arg(src_offset, "dbbCopyToByteArray() srcOffset")?;
+                self.validate_value_inner(dst, false)?;
+                let Some(dst_desc) = self.infer_value_descriptor(dst)? else {
+                    return Err("dbbCopyToByteArray() dst cannot be null/void".to_string());
+                };
+                if dst_desc != "[B" {
+                    return Err(format!("dbbCopyToByteArray() dst must be byte[], got {}", dst_desc));
+                }
+                self.validate_int_arg(dst_offset, "dbbCopyToByteArray() dstOffset")?;
+                self.validate_int_arg(length, "dbbCopyToByteArray() length")?;
             }
             DslStmt::ReturnOrig { args } => self.validate_orig_args(args)?,
             DslStmt::ReturnValue { value } => {

@@ -2,7 +2,7 @@ use crate::ffi;
 use crate::jsapi::callback_util::{throw_internal_error, with_registry_mut};
 use crate::jsapi::console::output_message;
 use crate::value::JSValue;
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -331,51 +331,203 @@ unsafe fn initialize_generated_message_queue(
     Ok(())
 }
 
-unsafe fn install_orig_backup_art_method(
-    backup_art_method: u64,
-    original_art_method: u64,
-    art_method_size: usize,
-    entry_point_offset: usize,
-    original_trampoline: u64,
-) -> Result<(), String> {
-    if backup_art_method == 0 || original_art_method == 0 || art_method_size == 0 || original_trampoline == 0 {
-        return Err("invalid managed orig backup ArtMethod state".to_string());
+unsafe fn direct_buffer_range(
+    env: JniEnv,
+    buffer: *mut c_void,
+    offset: i32,
+    length: i32,
+) -> Option<(*mut u8, usize)> {
+    if buffer.is_null() || offset < 0 || length <= 0 {
+        return None;
     }
-    if entry_point_offset + std::mem::size_of::<u64>() > art_method_size {
-        return Err(format!(
-            "invalid managed orig backup ArtMethod layout: ep_offset={} size={}",
-            entry_point_offset, art_method_size
-        ));
+    let get_address: GetDirectBufferAddressFn =
+        jni_fn!(env, GetDirectBufferAddressFn, JNI_GET_DIRECT_BUFFER_ADDRESS);
+    let get_capacity: GetDirectBufferCapacityFn =
+        jni_fn!(env, GetDirectBufferCapacityFn, JNI_GET_DIRECT_BUFFER_CAPACITY);
+    let base = get_address(env, buffer) as *mut u8;
+    let capacity = get_capacity(env, buffer);
+    if base.is_null() || capacity <= 0 || jni_check_exc(env) {
+        return None;
     }
+    let offset = offset as i64;
+    if offset >= capacity {
+        return None;
+    }
+    let available = capacity - offset;
+    let len = std::cmp::min(length as i64, available) as usize;
+    if len == 0 {
+        return None;
+    }
+    Some((base.add(offset as usize), len))
+}
 
-    std::ptr::copy_nonoverlapping(
-        original_art_method as *const u8,
-        backup_art_method as *mut u8,
-        art_method_size,
-    );
-    std::ptr::write_volatile(
-        (backup_art_method as usize + entry_point_offset) as *mut u64,
-        original_trampoline,
-    );
-    crate::ffi::hook::hook_flush_cache(
-        backup_art_method as *mut std::ffi::c_void,
-        art_method_size,
-    );
-    output_message(&format!(
-        "[managedHook] installed orig backup ArtMethod clone={:#x} source={:#x} size={} entry={:#x}",
-        backup_art_method, original_art_method, art_method_size, original_trampoline
-    ));
+unsafe extern "C" fn managed_dbb_fill(
+    env: JniEnv,
+    _cls: *mut c_void,
+    buffer: *mut c_void,
+    offset: i32,
+    length: i32,
+    value: i32,
+) -> i32 {
+    let Some((dst, len)) = direct_buffer_range(env, buffer, offset, length) else {
+        return 0;
+    };
+    std::ptr::write_bytes(dst, value as u8, len);
+    len as i32
+}
+
+unsafe extern "C" fn managed_dbb_copy_from_byte_array(
+    env: JniEnv,
+    _cls: *mut c_void,
+    buffer: *mut c_void,
+    dst_offset: i32,
+    src: *mut c_void,
+    src_offset: i32,
+    length: i32,
+) -> i32 {
+    if src.is_null() || src_offset < 0 || length <= 0 {
+        return 0;
+    }
+    let get_array_length: GetArrayLengthFn = jni_fn!(env, GetArrayLengthFn, JNI_GET_ARRAY_LENGTH);
+    let get_region: GetByteArrayRegionFn = jni_fn!(env, GetByteArrayRegionFn, JNI_GET_BYTE_ARRAY_REGION);
+    let src_len = get_array_length(env, src);
+    if src_len <= 0 || src_offset >= src_len || jni_check_exc(env) {
+        return 0;
+    }
+    let Some((dst, dst_len)) = direct_buffer_range(env, buffer, dst_offset, length) else {
+        return 0;
+    };
+    let src_available = src_len - src_offset;
+    let len = std::cmp::min(dst_len, std::cmp::min(length, src_available) as usize);
+    if len == 0 || len > i32::MAX as usize {
+        return 0;
+    }
+    let mut tmp = vec![0i8; len];
+    get_region(env, src, src_offset, len as i32, tmp.as_mut_ptr());
+    if jni_check_exc(env) {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(tmp.as_ptr() as *const u8, dst, len);
+    len as i32
+}
+
+unsafe extern "C" fn managed_dbb_copy_to_byte_array(
+    env: JniEnv,
+    _cls: *mut c_void,
+    buffer: *mut c_void,
+    src_offset: i32,
+    dst: *mut c_void,
+    dst_offset: i32,
+    length: i32,
+) -> i32 {
+    if dst.is_null() || dst_offset < 0 || length <= 0 {
+        return 0;
+    }
+    let get_array_length: GetArrayLengthFn = jni_fn!(env, GetArrayLengthFn, JNI_GET_ARRAY_LENGTH);
+    let set_region: SetByteArrayRegionFn = jni_fn!(env, SetByteArrayRegionFn, JNI_SET_BYTE_ARRAY_REGION);
+    let dst_len = get_array_length(env, dst);
+    if dst_len <= 0 || dst_offset >= dst_len || jni_check_exc(env) {
+        return 0;
+    }
+    let Some((src, src_len)) = direct_buffer_range(env, buffer, src_offset, length) else {
+        return 0;
+    };
+    let dst_available = dst_len - dst_offset;
+    let len = std::cmp::min(src_len, std::cmp::min(length, dst_available) as usize);
+    if len == 0 || len > i32::MAX as usize {
+        return 0;
+    }
+    set_region(env, dst, dst_offset, len as i32, src as *const i8);
+    if jni_check_exc(env) {
+        return 0;
+    }
+    len as i32
+}
+
+unsafe extern "C" fn managed_dbb_capacity(env: JniEnv, _cls: *mut c_void, buffer: *mut c_void) -> i32 {
+    if buffer.is_null() {
+        return -1;
+    }
+    let get_capacity: GetDirectBufferCapacityFn =
+        jni_fn!(env, GetDirectBufferCapacityFn, JNI_GET_DIRECT_BUFFER_CAPACITY);
+    let capacity = get_capacity(env, buffer);
+    if jni_check_exc(env) || capacity < 0 {
+        return -1;
+    }
+    std::cmp::min(capacity, i32::MAX as i64) as i32
+}
+
+unsafe extern "C" fn managed_dbb_get_u8(
+    env: JniEnv,
+    _cls: *mut c_void,
+    buffer: *mut c_void,
+    offset: i32,
+) -> i32 {
+    let Some((src, _len)) = direct_buffer_range(env, buffer, offset, 1) else {
+        return -1;
+    };
+    *src as i32
+}
+
+unsafe fn register_direct_buffer_helpers(env: JniEnv, helper_cls: *mut c_void) -> Result<(), String> {
+    let register_natives: RegisterNativesFn = jni_fn!(env, RegisterNativesFn, JNI_REGISTER_NATIVES);
+    let names = [
+        CString::new("__rf_dbb_fill").unwrap(),
+        CString::new("__rf_dbb_copy_from_byte_array").unwrap(),
+        CString::new("__rf_dbb_copy_to_byte_array").unwrap(),
+        CString::new("__rf_dbb_capacity").unwrap(),
+        CString::new("__rf_dbb_get_u8").unwrap(),
+    ];
+    let sigs = [
+        CString::new("(Ljava/nio/ByteBuffer;III)I").unwrap(),
+        CString::new("(Ljava/nio/ByteBuffer;I[BII)I").unwrap(),
+        CString::new("(Ljava/nio/ByteBuffer;I[BII)I").unwrap(),
+        CString::new("(Ljava/nio/ByteBuffer;)I").unwrap(),
+        CString::new("(Ljava/nio/ByteBuffer;I)I").unwrap(),
+    ];
+    let methods = [
+        JniNativeMethod {
+            name: names[0].as_ptr(),
+            signature: sigs[0].as_ptr(),
+            fn_ptr: managed_dbb_fill as *mut c_void,
+        },
+        JniNativeMethod {
+            name: names[1].as_ptr(),
+            signature: sigs[1].as_ptr(),
+            fn_ptr: managed_dbb_copy_from_byte_array as *mut c_void,
+        },
+        JniNativeMethod {
+            name: names[2].as_ptr(),
+            signature: sigs[2].as_ptr(),
+            fn_ptr: managed_dbb_copy_to_byte_array as *mut c_void,
+        },
+        JniNativeMethod {
+            name: names[3].as_ptr(),
+            signature: sigs[3].as_ptr(),
+            fn_ptr: managed_dbb_capacity as *mut c_void,
+        },
+        JniNativeMethod {
+            name: names[4].as_ptr(),
+            signature: sigs[4].as_ptr(),
+            fn_ptr: managed_dbb_get_u8 as *mut c_void,
+        },
+    ];
+    if register_natives(env, helper_cls, methods.as_ptr(), methods.len() as i32) != 0 || jni_check_exc(env) {
+        return Err("RegisterNatives failed for managed DirectByteBuffer helpers".to_string());
+    }
+    output_message("[managedHook] registered DirectByteBuffer native helpers");
     Ok(())
 }
 
 unsafe fn set_orig_backup_entrypoint(
     backup_art_method: u64,
     art_method_size: usize,
+    access_flags_offset: usize,
     entry_point_offset: usize,
-    trampoline: u64,
+    entrypoint: u64,
 ) -> Result<(), String> {
-    if backup_art_method == 0 || trampoline == 0 {
-        return Err("invalid managed orig backup trampoline state".to_string());
+    if backup_art_method == 0 || entrypoint == 0 {
+        return Err("invalid managed orig backup entrypoint state".to_string());
     }
     if entry_point_offset + std::mem::size_of::<u64>() > art_method_size {
         return Err(format!(
@@ -383,18 +535,26 @@ unsafe fn set_orig_backup_entrypoint(
             entry_point_offset, art_method_size
         ));
     }
+    if access_flags_offset + std::mem::size_of::<u32>() > art_method_size {
+        return Err(format!(
+            "invalid managed orig backup flags layout: flags_offset={} size={}",
+            access_flags_offset, art_method_size
+        ));
+    }
 
+    let flags = std::ptr::read_volatile((backup_art_method as usize + access_flags_offset) as *const u32);
+    std::ptr::write_volatile(
+        (backup_art_method as usize + access_flags_offset) as *mut u32,
+        flags | k_acc_compile_dont_bother(),
+    );
     std::ptr::write_volatile(
         (backup_art_method as usize + entry_point_offset) as *mut u64,
-        trampoline,
+        entrypoint,
     );
-    crate::ffi::hook::hook_flush_cache(
-        backup_art_method as *mut std::ffi::c_void,
-        art_method_size,
-    );
+    crate::ffi::hook::hook_flush_cache(backup_art_method as *mut std::ffi::c_void, art_method_size);
     output_message(&format!(
-        "[managedHook] orig backup ArtMethod entrypoint -> trampoline {:#x}",
-        trampoline
+        "[managedHook] orig backup ArtMethod entrypoint -> stub {:#x}",
+        entrypoint
     ));
     Ok(())
 }
@@ -513,9 +673,6 @@ unsafe fn install_managed_method_helper(
         return Err("managed helper still has shared ART entrypoint after compile".to_string());
     }
     let helper_entry_point = read_entry_point(helper_art_method, helper_spec.entry_point_offset);
-    if let Some(backup_art_method) = orig_backup_art_method {
-        install_orig_backup_art_method(backup_art_method, art_method, spec.size, ep_offset, original_entry_point)?;
-    }
     let orig_bypass_art_method = art_method;
     let class_global_ref = create_class_global_ref(env, class_name)?;
     let mut install_guard = JavaHookInstallGuard::new(
@@ -553,7 +710,18 @@ unsafe fn install_managed_method_helper(
     }
     super::super::art_controller::try_fixup_trampoline_pub(quick_trampoline, original_entry_point);
     if let Some(backup_art_method) = orig_backup_art_method {
-        set_orig_backup_entrypoint(backup_art_method, spec.size, ep_offset, quick_trampoline as u64)?;
+        let orig_stub = crate::ffi::hook::hook_create_managed_orig_stub(art_method, quick_trampoline);
+        if orig_stub.is_null() {
+            delete_local_ref(env, helper_cls);
+            return Err("hook_create_managed_orig_stub failed".to_string());
+        }
+        set_orig_backup_entrypoint(
+            backup_art_method,
+            spec.size,
+            spec.access_flags_offset,
+            ep_offset,
+            orig_stub as u64,
+        )?;
     }
     let per_method_hook_target = if !hooked_target.is_null() {
         Some(hooked_target as u64)
@@ -662,6 +830,9 @@ unsafe fn install_managed_dsl_inner(
     let helper_cls = load_dynamic_managed_helper_class(env, generated.dex, &generated.class_name)?;
     initialize_generated_string_literals(env, helper_cls, &generated.string_literals)?;
     initialize_generated_message_queue(env, helper_cls, &generated.message_channels, generated.message_capacity)?;
+    if generated.uses_direct_buffer_helpers {
+        register_direct_buffer_helpers(env, helper_cls)?;
+    }
     install_managed_method_helper(
         env,
         class_name,

@@ -26,6 +26,15 @@ impl<'a> DslParser<'a> {
         if name == "send" && self.peek() == Some('(') {
             return self.parse_send_statement();
         }
+        if name == "dbbFill" && self.peek() == Some('(') {
+            return self.parse_direct_buffer_fill_statement();
+        }
+        if name == "dbbCopyFromByteArray" && self.peek() == Some('(') {
+            return self.parse_direct_buffer_copy_from_byte_array_statement();
+        }
+        if name == "dbbCopyToByteArray" && self.peek() == Some('(') {
+            return self.parse_direct_buffer_copy_to_byte_array_statement();
+        }
         if self.peek() == Some('=') {
             self.expect_char('=')?;
             let value = self.parse_value_arg()?;
@@ -95,6 +104,86 @@ impl<'a> DslParser<'a> {
         Ok(DslStmt::Send {
             name: channel_name,
             value,
+        })
+    }
+
+    fn parse_direct_buffer_fill_statement(&mut self) -> Result<DslStmt, String> {
+        self.expect_char('(')?;
+        let buffer = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let offset = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let length = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let value = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(')')?;
+        self.skip_ws();
+        self.expect_char(';')?;
+        Ok(DslStmt::DirectBufferFill {
+            buffer,
+            offset,
+            length,
+            value,
+        })
+    }
+
+    fn parse_direct_buffer_copy_from_byte_array_statement(&mut self) -> Result<DslStmt, String> {
+        self.expect_char('(')?;
+        let buffer = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let dst_offset = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let src = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let src_offset = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let length = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(')')?;
+        self.skip_ws();
+        self.expect_char(';')?;
+        Ok(DslStmt::DirectBufferCopyFromByteArray {
+            buffer,
+            dst_offset,
+            src,
+            src_offset,
+            length,
+        })
+    }
+
+    fn parse_direct_buffer_copy_to_byte_array_statement(&mut self) -> Result<DslStmt, String> {
+        self.expect_char('(')?;
+        let buffer = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let src_offset = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let dst = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let dst_offset = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(',')?;
+        let length = self.parse_value_arg()?;
+        self.skip_ws();
+        self.expect_char(')')?;
+        self.skip_ws();
+        self.expect_char(';')?;
+        Ok(DslStmt::DirectBufferCopyToByteArray {
+            buffer,
+            src_offset,
+            dst,
+            dst_offset,
+            length,
         })
     }
 
