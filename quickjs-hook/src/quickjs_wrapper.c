@@ -261,6 +261,11 @@ void qjs_update_stack_top(JSContext *ctx) {
     JS_UpdateStackTop(rt);
 }
 
+/* Instruction-cache flush helper for code generated outside QuickJS. */
+void qjs_clear_cache(void *start, void *end) {
+    __builtin___clear_cache((char *) start, (char *) end);
+}
+
 /*
  * qjs_throw_error_with_message - 抛一个完整消息的 Error（绕开 256 字节截断）
  *

@@ -1,6 +1,7 @@
 //! hook() and unhook() API implementation
 
 mod callback;
+mod cmodule;
 mod functions;
 #[cfg(feature = "qbdi")]
 mod qbdi;
@@ -13,8 +14,9 @@ use crate::jsapi::util::add_cfunction_to_object;
 
 use callback::{in_flight_native_hook_callbacks, wait_for_in_flight_native_hook_callbacks};
 use functions::{
-    js_call_native, js_diag_alloc_near, js_hook, js_interceptor_attach, js_interceptor_detach_all,
-    js_interceptor_flush, js_interceptor_replace, js_native_call, js_recomp_hook, js_unhook,
+    js_attach_native, js_call_native, js_diag_alloc_near, js_hook, js_hook_native, js_interceptor_attach,
+    js_interceptor_detach_all, js_interceptor_flush, js_interceptor_replace, js_native_call, js_recomp_hook,
+    js_unhook,
 };
 #[cfg(feature = "qbdi")]
 pub use qbdi::preload_qbdi_helper;
@@ -30,6 +32,8 @@ pub fn register_hook_api(ctx: &JSContext) {
     unsafe {
         let g = global.raw();
         add_cfunction_to_object(ctx.as_ptr(), g, "hook", js_hook, 3);
+        add_cfunction_to_object(ctx.as_ptr(), g, "hookNative", js_hook_native, 4);
+        add_cfunction_to_object(ctx.as_ptr(), g, "attachNative", js_attach_native, 4);
         add_cfunction_to_object(ctx.as_ptr(), g, "unhook", js_unhook, 1);
         add_cfunction_to_object(ctx.as_ptr(), g, "callNative", js_call_native, 1);
         add_cfunction_to_object(ctx.as_ptr(), g, "recompHook", js_recomp_hook, 2);
@@ -51,6 +55,8 @@ pub fn register_hook_api(ctx: &JSContext) {
         add_cfunction_to_object(ctx.as_ptr(), interceptor, "detachAll", js_interceptor_detach_all, 0);
         add_cfunction_to_object(ctx.as_ptr(), interceptor, "flush", js_interceptor_flush, 0);
         global.set_property(ctx.as_ptr(), "Interceptor", crate::value::JSValue(interceptor));
+
+        cmodule::register_cmodule_api(ctx.as_ptr(), g);
     }
 
     #[cfg(feature = "qbdi")]

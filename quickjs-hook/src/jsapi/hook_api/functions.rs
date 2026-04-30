@@ -7,6 +7,7 @@ use crate::jsapi::callback_util::{
     js_i64_to_js_number_or_bigint, js_value_to_u64_or_zero, set_js_cfunction_property, set_js_u64_property,
     throw_internal_error,
 };
+use crate::jsapi::ptr::create_native_pointer;
 use crate::jsapi::util::is_addr_accessible;
 use crate::value::JSValue;
 
@@ -257,6 +258,297 @@ pub(crate) unsafe extern "C" fn js_call_native(
     let result = func(args[0], args[1], args[2], args[3], args[4], args[5]);
 
     js_i64_to_js_number_or_bigint(ctx, result)
+}
+
+/// hookNative(target, callbackPtr, userData?, mode?)
+///
+/// Installs a native HookCallback directly on the hot path:
+///   void callback(HookContext *ctx, void *user_data)
+///
+/// The callback may modify ctx->x[0] as the return value, or call
+/// hook_invoke_trampoline(ctx, ctx->trampoline) from C to invoke the original.
+pub(crate) unsafe extern "C" fn js_hook_native(
+    ctx: *mut ffi::JSContext,
+    _this: ffi::JSValue,
+    argc: i32,
+    argv: *mut ffi::JSValue,
+) -> ffi::JSValue {
+    if argc < 2 {
+        return ffi::JS_ThrowTypeError(
+            ctx,
+            b"hookNative(target, callbackPtr, userData?, mode?) requires target and callback\0".as_ptr()
+                as *const _,
+        );
+    }
+
+    let target = match extract_pointer_address(ctx, JSValue(*argv), "hookNative target") {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    let callback_addr = match extract_pointer_address(ctx, JSValue(*argv.add(1)), "hookNative callback") {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    if callback_addr < 0x10000 || !is_addr_accessible(callback_addr, 4) {
+        return ffi::JS_ThrowRangeError(
+            ctx,
+            b"hookNative callback address is not mapped\0".as_ptr() as *const _,
+        );
+    }
+
+    let user_data = if argc >= 3 {
+        js_value_to_u64_or_zero(ctx, JSValue(*argv.add(2)))
+    } else {
+        0
+    };
+    let mode = if argc >= 4 {
+        parse_stealth_mode(ctx, JSValue(*argv.add(3)))
+    } else {
+        StealthMode::Normal
+    };
+
+    init_registry();
+
+    if let Some(old_data) = with_registry_mut(&HOOK_REGISTRY, |registry| registry.remove(&target)).flatten() {
+        super::remove_single_hook(target, &old_data);
+        if super::callback::wait_for_in_flight_native_hook_callbacks(std::time::Duration::from_millis(20)) {
+            super::free_hook_callback(&old_data);
+        }
+    }
+
+    let (hook_addr, recomp_addr) = match mode {
+        StealthMode::Recomp => {
+            if let Err(e) = crate::recomp::ensure_and_translate(target as usize) {
+                return throw_internal_error(ctx, &format!("hookNative(recomp): {}", e));
+            }
+            match crate::recomp::alloc_trampoline_slot(target as usize) {
+                Ok(slot) => (slot as u64, slot as u64),
+                Err(e) => return throw_internal_error(ctx, &format!("hookNative(recomp slot): {}", e)),
+            }
+        }
+        _ => (target, 0),
+    };
+
+    let stealth_flag = match mode {
+        StealthMode::WxShadow => 1,
+        StealthMode::Recomp => 2,
+        _ => 0,
+    };
+    let callback_fn: unsafe extern "C" fn(
+        *mut hook_ffi::HookContext,
+        *mut std::ffi::c_void,
+    ) = std::mem::transmute(callback_addr as usize);
+
+    let trampoline = hook_ffi::hook_replace(
+        hook_addr as *mut std::ffi::c_void,
+        Some(callback_fn),
+        user_data as *mut std::ffi::c_void,
+        stealth_flag,
+    );
+    if trampoline.is_null() {
+        return throw_internal_error(ctx, "hookNative: hook_replace failed");
+    }
+
+    if mode == StealthMode::Recomp {
+        let _ = crate::recomp::fixup_slot_trampoline(trampoline as *mut u8, target as usize);
+        let _ = crate::recomp::commit_slot_patch(target as usize);
+    }
+
+    with_registry_mut(&HOOK_REGISTRY, |registry| {
+        registry.insert(
+            target,
+            HookData {
+                ctx: ctx as usize,
+                callback_bytes: [0u8; 16],
+                on_leave_bytes: [0u8; 16],
+                has_on_enter: false,
+                has_on_leave: false,
+                trampoline: trampoline as u64,
+                kind: HookKind::Replace,
+                mode,
+                recomp_addr,
+            },
+        );
+    });
+
+    create_native_pointer(ctx, trampoline as u64).raw()
+}
+
+/// attachNative(target, onEnterPtr, userData?, mode?)
+/// attachNative(target, { onEnter?, onLeave?, data?, mode? })
+///
+/// Installs a native onEnter callback with hook_attach(). The hook engine calls
+/// the original function automatically after onEnter returns. If no native
+/// onLeave is installed, the hook engine tail-jumps to the original function.
+pub(crate) unsafe extern "C" fn js_attach_native(
+    ctx: *mut ffi::JSContext,
+    _this: ffi::JSValue,
+    argc: i32,
+    argv: *mut ffi::JSValue,
+) -> ffi::JSValue {
+    if argc < 2 {
+        return ffi::JS_ThrowTypeError(
+            ctx,
+            b"attachNative(target, callbackPtr|options, userData?, mode?) requires target and callback\0".as_ptr()
+                as *const _,
+        );
+    }
+
+    let target = match extract_pointer_address(ctx, JSValue(*argv), "attachNative target") {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+    type NativeHookCallback = unsafe extern "C" fn(*mut hook_ffi::HookContext, *mut std::ffi::c_void);
+
+    let callback_arg = JSValue(*argv.add(1));
+    let on_enter_prop = callback_arg.get_property(ctx, "onEnter");
+    let on_leave_prop = callback_arg.get_property(ctx, "onLeave");
+    let is_options = callback_arg.is_object() && (!on_enter_prop.is_undefined() || !on_leave_prop.is_undefined());
+
+    let (on_enter_addr, on_leave_addr, user_data, mode) = if is_options {
+        let data_prop = callback_arg.get_property(ctx, "data");
+        let mode_prop = callback_arg.get_property(ctx, "mode");
+        let parsed = (|| -> Result<(u64, u64, u64, StealthMode), ffi::JSValue> {
+            let on_enter = if on_enter_prop.is_undefined() || on_enter_prop.is_null() {
+                0
+            } else {
+                extract_pointer_address(ctx, on_enter_prop, "attachNative onEnter")?
+            };
+            let on_leave = if on_leave_prop.is_undefined() || on_leave_prop.is_null() {
+                0
+            } else {
+                extract_pointer_address(ctx, on_leave_prop, "attachNative onLeave")?
+            };
+            if on_enter == 0 && on_leave == 0 {
+                return Err(ffi::JS_ThrowTypeError(
+                    ctx,
+                    b"attachNative options must provide onEnter or onLeave\0".as_ptr() as *const _,
+                ));
+            }
+            let data = if data_prop.is_undefined() || data_prop.is_null() {
+                0
+            } else {
+                js_value_to_u64_or_zero(ctx, data_prop)
+            };
+            let parsed_mode = if mode_prop.is_undefined() || mode_prop.is_null() {
+                StealthMode::Normal
+            } else {
+                parse_stealth_mode(ctx, mode_prop)
+            };
+            Ok((on_enter, on_leave, data, parsed_mode))
+        })();
+        data_prop.free(ctx);
+        mode_prop.free(ctx);
+        match parsed {
+            Ok(v) => v,
+            Err(e) => {
+                on_enter_prop.free(ctx);
+                on_leave_prop.free(ctx);
+                return e;
+            }
+        }
+    } else {
+        let on_enter = match extract_pointer_address(ctx, callback_arg, "attachNative callback") {
+            Ok(a) => a,
+            Err(e) => {
+                on_enter_prop.free(ctx);
+                on_leave_prop.free(ctx);
+                return e;
+            }
+        };
+        let data = if argc >= 3 {
+            js_value_to_u64_or_zero(ctx, JSValue(*argv.add(2)))
+        } else {
+            0
+        };
+        let parsed_mode = if argc >= 4 {
+            parse_stealth_mode(ctx, JSValue(*argv.add(3)))
+        } else {
+            StealthMode::Normal
+        };
+        (on_enter, 0, data, parsed_mode)
+    };
+    on_enter_prop.free(ctx);
+    on_leave_prop.free(ctx);
+
+    if on_enter_addr != 0 && (on_enter_addr < 0x10000 || !is_addr_accessible(on_enter_addr, 4)) {
+        return ffi::JS_ThrowRangeError(ctx, b"attachNative onEnter address is not mapped\0".as_ptr() as *const _);
+    }
+    if on_leave_addr != 0 && (on_leave_addr < 0x10000 || !is_addr_accessible(on_leave_addr, 4)) {
+        return ffi::JS_ThrowRangeError(ctx, b"attachNative onLeave address is not mapped\0".as_ptr() as *const _);
+    }
+
+    init_registry();
+    if let Some(old_data) = with_registry_mut(&HOOK_REGISTRY, |registry| registry.remove(&target)).flatten() {
+        super::remove_single_hook(target, &old_data);
+        if super::callback::wait_for_in_flight_native_hook_callbacks(std::time::Duration::from_millis(20)) {
+            super::free_hook_callback(&old_data);
+        }
+    }
+
+    let (hook_addr, recomp_addr) = match mode {
+        StealthMode::Recomp => {
+            if let Err(e) = crate::recomp::ensure_and_translate(target as usize) {
+                return throw_internal_error(ctx, &format!("attachNative(recomp): {}", e));
+            }
+            match crate::recomp::alloc_trampoline_slot(target as usize) {
+                Ok(slot) => (slot as u64, slot as u64),
+                Err(e) => return throw_internal_error(ctx, &format!("attachNative(recomp slot): {}", e)),
+            }
+        }
+        _ => (target, 0),
+    };
+    let stealth_flag = match mode {
+        StealthMode::WxShadow => 1,
+        StealthMode::Recomp => 2,
+        _ => 0,
+    };
+    let on_enter_fn: Option<NativeHookCallback> = if on_enter_addr == 0 {
+        None
+    } else {
+        Some(std::mem::transmute(on_enter_addr as usize))
+    };
+    let on_leave_fn: Option<NativeHookCallback> = if on_leave_addr == 0 {
+        None
+    } else {
+        Some(std::mem::transmute(on_leave_addr as usize))
+    };
+    let result = hook_ffi::hook_attach(
+        hook_addr as *mut std::ffi::c_void,
+        on_enter_fn,
+        on_leave_fn,
+        user_data as *mut std::ffi::c_void,
+        stealth_flag,
+    );
+    if result != HOOK_OK {
+        return throw_internal_error(ctx, &format!("attachNative: {}", hook_error_str(result)));
+    }
+    if mode == StealthMode::Recomp {
+        let trampoline = hook_ffi::hook_get_trampoline(hook_addr as *mut std::ffi::c_void);
+        if !trampoline.is_null() {
+            let _ = crate::recomp::fixup_slot_trampoline(trampoline as *mut u8, target as usize);
+        }
+        let _ = crate::recomp::commit_slot_patch(target as usize);
+    }
+
+    with_registry_mut(&HOOK_REGISTRY, |registry| {
+        registry.insert(
+            target,
+            HookData {
+                ctx: ctx as usize,
+                callback_bytes: [0u8; 16],
+                on_leave_bytes: [0u8; 16],
+                has_on_enter: on_enter_addr != 0,
+                has_on_leave: on_leave_addr != 0,
+                trampoline: 0,
+                kind: HookKind::Attach,
+                mode,
+                recomp_addr,
+            },
+        );
+    });
+
+    JSValue::bool(true).raw()
 }
 
 // ─────────────────────────── NativeFunction API ──────────────────────────────

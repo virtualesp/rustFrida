@@ -5,6 +5,60 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let src_path = PathBuf::from(&manifest_dir).join("src");
+    let target = env::var("TARGET").unwrap_or_default();
+
+    // Compile TinyCC/libtcc for the target. RF only exposes the in-memory
+    // compiler API, so we build the single-source library and feed it headers
+    // from Rust callbacks at runtime instead of installing a tcc sysroot.
+    let tinycc_src = PathBuf::from(&manifest_dir).join("third_party/tinycc");
+    if tinycc_src.join("libtcc.c").exists() {
+        let tcc_config_dir = out_path.join("tinycc_config");
+        std::fs::create_dir_all(&tcc_config_dir).expect("create tinycc config dir");
+        std::fs::write(
+            tcc_config_dir.join("config.h"),
+            "#ifndef RF_TINYCC_CONFIG_H\n\
+             #define RF_TINYCC_CONFIG_H\n\
+             #define TCC_VERSION \"0.9.27-rf\"\n\
+             #define CONFIG_TCCDIR \"/rf\"\n\
+             #endif\n",
+        )
+        .expect("write tinycc config.h");
+
+        let mut tcc = cc::Build::new();
+        tcc.file(tinycc_src.join("libtcc.c"))
+            .include(&tinycc_src)
+            .include(&tcc_config_dir)
+            .opt_level(2)
+            .flag("-fPIC")
+            .flag("-fno-exceptions")
+            .flag("-DONE_SOURCE=1")
+            .flag("-DCONFIG_TCCBOOT")
+            .warnings(false);
+
+        if target.contains("aarch64") {
+            tcc.flag("-DTCC_TARGET_ARM64");
+        } else if target.contains("armv7") || target.contains("arm-linux") {
+            tcc.flag("-DTCC_TARGET_ARM");
+            tcc.flag("-DTCC_ARM_EABI");
+            tcc.flag("-DTCC_ARM_VFP");
+        } else if target.contains("x86_64") {
+            tcc.flag("-DTCC_TARGET_X86_64");
+        } else if target.contains("i686") || target.contains("i586") {
+            tcc.flag("-DTCC_TARGET_I386");
+        }
+
+        if target.contains("android") {
+            tcc.flag("-DANDROID");
+        }
+
+        tcc.compile("tinycc");
+        println!("cargo:rustc-link-lib=static=tinycc");
+        println!("cargo:rerun-if-changed=third_party/tinycc/libtcc.c");
+        println!("cargo:rerun-if-changed=third_party/tinycc/libtcc.h");
+        println!("cargo:rerun-if-changed=third_party/tinycc/tcc.h");
+    } else {
+        println!("cargo:warning=TinyCC source not found at {:?}", tinycc_src);
+    }
 
     // Compile hook_engine.c, arm64_writer.c, arm64_relocator.c,
     // 以及 native_call.S (AAPCS64 变参调用 shim)
@@ -63,7 +117,7 @@ fn main() {
         }
 
         // Android-specific flags
-        if env::var("TARGET").unwrap_or_default().contains("android") {
+        if target.contains("android") {
             build.flag("-DANDROID");
         }
 
