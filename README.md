@@ -9,6 +9,14 @@ ARM64 Android 动态插桩框架。
 - Python 3（构建 loader shellcode）
 - `.cargo/config.toml` 已配置交叉编译（仓库自带）
 
+首次 clone 后先拉取子仓库：
+
+```bash
+git submodule update --init --recursive
+```
+
+`quickjs-hook/third_party/tinycc` 是 RF 的 CModule 编译器子仓库，默认跟随 `https://github.com/kkkbbb/tinycc.git` 的 `rf/cmodule-runtime` 分支。
+
 ## 构建
 
 最终产物 `rustfrida` 通过 `include_bytes!` 内嵌了 loader shellcode 和 agent SO，有严格的**构建顺序**：
@@ -65,6 +73,31 @@ cargo build -p rust_frida --release --features qbdi  # rustfrida 嵌入 qbdi-hel
 ```bash
 cargo build -p ldmonitor --release    # → ldmonitor 独立二进制
 ```
+
+### TinyCC 子仓库维护
+
+RF 的 CModule 功能依赖 `quickjs-hook/third_party/tinycc`。该目录是 git submodule，RF 定制修改维护在 `rf/cmodule-runtime` 分支：
+
+```bash
+git -C quickjs-hook/third_party/tinycc remote -v
+# origin   https://github.com/kkkbbb/tinycc.git
+# upstream https://github.com/frida/tinycc.git
+
+git -C quickjs-hook/third_party/tinycc status --short --branch
+```
+
+同步上游时，在子仓库 rebase 后更新父仓库的 gitlink：
+
+```bash
+git -C quickjs-hook/third_party/tinycc fetch upstream
+git -C quickjs-hook/third_party/tinycc rebase upstream/main
+git -C quickjs-hook/third_party/tinycc push origin rf/cmodule-runtime
+
+git add quickjs-hook/third_party/tinycc
+git commit -m "Update tinycc submodule"
+```
+
+如果修改了 TinyCC 本身，先在子仓库提交并 push，再回到父仓库提交 submodule 指针。
 
 ## 部署 & 运行
 
@@ -133,7 +166,8 @@ Java.ready(function() {
 | Hook Java 方法、改参数/返回值 | `Java.use()` | `Class.method.impl = function (...) { ... }` |
 | 高频 Java 方法 Hook | Managed DSL 动态编译器 | `method.dslImpl = script` |
 | Hook native 函数并继续跑原函数 | `Interceptor.attach` | `onEnter(args)` / `onLeave(retval)` |
-| 完全替换 native 函数 | `hook()` 或 `Interceptor.replace()` | `this.orig(...)` / `return value` |
+| 完全替换 native 函数 | `hook()` 或 `Interceptor.replace()` | `return value` / 条件性 `this.orig()` |
+| 高频 native Hook | `CModule` + `attachNative` / `hookNative` | `void cb(HookContext *ctx, void *data)` |
 | 查找 so、符号、导入导出 | `Module` | `findExportByName()` / `enumerateSymbols()` |
 | 读写目标进程内存 | `Memory` / `ptr()` | `p.readU32()` / `p.writeBytes()` |
 | 监控 JNI 注册 | `Jni` + native hook | `Jni.addr("RegisterNatives")` |
@@ -212,9 +246,10 @@ Interceptor.attach(getuid, {
 var getpid = Module.findExportByName("libc.so", "getpid");
 
 hook(getpid, function() {
-    var real = this.orig();
-    console.log("real pid =", real);
-    return 12345;
+    if (Date.now() & 1) {
+        return this.orig();     // 调原函数，参数默认来自当前寄存器
+    }
+    return 12345;               // 跳过原函数
 });
 ```
 
@@ -223,18 +258,18 @@ hook(getpid, function() {
 适合定位 Java native 方法和 so 内真实函数地址。
 
 ```js
-hook(Jni.addr("RegisterNatives"), function(env, clazz, methodsPtr, count) {
-    var cls = Jni.env.getClassName(clazz);
-    var methods = Jni.structs.JNINativeMethod.readArray(ptr(methodsPtr), Number(count));
+Interceptor.attach(Jni.addr("RegisterNatives"), {
+    onEnter(args) {
+        var cls = Jni.env.getClassName(args[1]);
+        var methods = Jni.structs.JNINativeMethod.readArray(args[2], Number(args[3]));
 
-    console.log("RegisterNatives:", cls);
-    methods.forEach(function(m) {
-        var mod = Module.findByAddress(m.fnPtr);
-        var where = mod ? mod.name + "+" + m.fnPtr.sub(mod.base) : m.fnPtr.toString();
-        console.log("  " + m.name + " " + m.sig + " -> " + where);
-    });
-
-    return this.orig();
+        console.log("RegisterNatives:", cls);
+        methods.forEach(function(m) {
+            var mod = Module.findByAddress(m.fnPtr);
+            var where = mod ? mod.name + "+" + m.fnPtr.sub(mod.base) : m.fnPtr.toString();
+            console.log("  " + m.name + " " + m.sig + " -> " + where);
+        });
+    }
 });
 ```
 
@@ -267,6 +302,7 @@ curl -X POST http://127.0.0.1:9191/rpc/0/ping
 - 高频 Java Hook 用 DSL 动态编译器，避免每次命中都进 JS runtime。
 - Native 只改参数并继续执行，用 `Interceptor.attach({ onEnter })`。
 - Native 需要决定是否调用原函数，用 `hook()` / `Interceptor.replace()`。
+- 高频 Native 热路径用 `CModule` 写 C callback，再用 `attachNative` / `hookNative` 安装。
 - 不知道用哪个 stealth 模式时先用默认模式；遇到检测或只读代码页问题再切 `Hook.WXSHADOW` / `Hook.RECOMP`。
 
 ---
@@ -367,7 +403,7 @@ curl http://127.0.0.1:9191/sessions
 
 ### 全局对象一览
 
-`console`, `ptr()`, `Memory`, `File`, `Module`, `Interceptor`, `hook()`, `unhook()`, `callNative()`, `qbdi`, `Java`, `Jni`
+`console`, `ptr()`, `Memory`, `File`, `Module`, `Interceptor`, `CModule`, `hook()`, `hookNative()`, `attachNative()`, `unhook()`, `callNative()`, `qbdi`, `Java`, `Jni`
 
 ### 常用类型别名
 
@@ -391,13 +427,13 @@ type NativeHookThis = {
   sp: bigint
   pc: bigint
   trampoline: bigint
-  orig(...args: any[]): bigint // 调原函数；不传参用当前寄存器，传参按顺序覆盖 x0-xN
+  orig(): bigint               // 调原函数；默认使用当前寄存器（入口原参数，或你已写入的 this.xN）
 }
 
 // native hook 写法：
 // hook(addr, function(a, b, c) {     // arguments[0..7] = x0..x7（BigInt）
 //   this.x0 = ptr("0x1234");          // 改寄存器
-//   return this.orig();               // 调原函数
+//   return this.orig();               // replace hook 中显式调原函数
 // });
 
 type JavaInstanceThis = JavaObjectProxy & {
@@ -450,28 +486,26 @@ type JNINativeMethodInfo = {
 Frida 风格：**`arguments`** = x0..x7（前 8 个整型参数，BigInt），**`this`** = register 上下文（含 x0-x30 / sp / pc / orig）。
 
 ```js
-// 基本 hook — 透传
-hook(Module.findExportByName("libc.so", "open"), function(path, flags) {
-    console.log("open:", Memory.readCString(ptr(path)), "flags=" + flags);
-    return this.orig();
+// 固定继续执行原函数：用 attach，不要用 hook()+orig() 透传
+Interceptor.attach(Module.findExportByName("libc.so", "open"), {
+    onEnter(args) {
+        console.log("open:", args[0].readCString(), "flags=" + args[1]);
+    }
 });
 
 // 修改返回值（直接 return 覆盖）
 hook(Module.findExportByName("libc.so", "getpid"), function() {
-    this.orig();
     return 12345;              // 调用方拿到 12345
 });
 
-// 修改参数 — 通过 this.xN
+// 条件性调用原函数：用 hook()/replace；无参数 orig() 会使用当前 this.xN
 hook(target, function(a, b) {
+    if (Number(a) === 0) {
+        return -1;             // 跳过原函数
+    }
     this.x0 = ptr("0x1234");   // 改第一个参数
     this.x1 = 100;             // 改第二个参数
-    return this.orig();         // 用修改后的参数调原函数
-});
-
-// 修改参数 — 通过 orig() 传参（按顺序覆盖 x0-xN）
-hook(target, function() {
-    return this.orig(ptr("0x1234"), 100);
+    return this.orig();        // 用当前寄存器调原函数
 });
 
 // 不 return 也行 — this.x0 赋值会同步回 C 层
@@ -511,6 +545,119 @@ atan2(1.0, 2.0);
 
 AAPCS64 调用约定：整数/指针先填 x0-x7，浮点先填 d0-d7（两队列独立），超出部分自动压栈。不支持 struct-by-value。
 
+
+### CModule 和 native C callback
+
+`CModule` 用内置 TinyCC 在目标进程里动态编译 C 代码，适合把高频 native hook 的热路径从 JS callback 下沉到 C callback。CModule 对象持有编译后的代码内存；只要 hook 还在使用其中的函数指针，就必须保留 JS 引用，避免 GC 释放代码。
+
+```js
+var cm = new CModule(`
+    #include <rfhook.h>
+
+    void on_getuid(HookContext *ctx, void *user_data) {
+        uint64_t real = hook_invoke_trampoline(ctx, ctx->trampoline);
+        ctx->x[0] = (real == 0 ? 0 : 20000);
+    }
+`);
+
+globalThis.keep_getuid_cmodule = cm;        // hook 存活期间必须保留引用
+
+var getuid = Module.findExportByName("libc.so", "getuid");
+var trampoline = hookNative(getuid, cm.on_getuid);
+```
+
+`hookNative(target, callbackPtr, userData?, mode?)` 是 replace 语义：原函数不会自动执行。需要原函数时，在 C callback 里调用 `hook_invoke_trampoline(ctx, ctx->trampoline)`；不需要原函数时直接改 `ctx->x[0]`。
+
+```js
+var cm = new CModule(`
+    #include <rfhook.h>
+
+    struct Counter {
+        uint64_t calls;
+    };
+
+    void on_enter(HookContext *ctx, void *user_data) {
+        struct Counter *counter = (struct Counter *) user_data;
+        counter->calls++;
+        ctx->x[1] = 0;        // 改第二个参数
+    }
+
+    void on_leave(HookContext *ctx, void *user_data) {
+        if ((int64_t) ctx->x[0] < 0) {
+            ctx->x[0] = 0;    // onLeave 中 x0 是返回值
+        }
+    }
+`);
+
+globalThis.keep_open_cmodule = cm;
+
+var state = Memory.alloc(8);
+state.writeU64(0);
+
+var open = Module.findExportByName("libc.so", "open");
+attachNative(open, {
+    onEnter: cm.on_enter,
+    onLeave: cm.on_leave,
+    data: state,
+    mode: Hook.NORMAL
+});
+```
+
+`attachNative(target, { onEnter?, onLeave?, data?, mode? })` 是 attach 语义：hook engine 会自动执行原函数。只提供 `onEnter` 时走 tail-jump 快路径，不保留 leave 状态；提供 `onLeave` 时才会在原函数返回后进入 leave callback。`onEnter` 和 `onLeave` 的 C 函数签名相同：
+
+```c
+void callback(HookContext *ctx, void *user_data);
+```
+
+两者区别只在时机和 `ctx` 内容：
+
+| 阶段 | `ctx->x[0..]` 含义 | 原函数 |
+| --- | --- | --- |
+| `onEnter` | 入参寄存器，可改参数 | 返回后自动执行 |
+| `onLeave` | `x0` 是返回值，可改返回值 | 已经执行完 |
+
+如果安装了 `onLeave`，`onEnter` 可用 `ctx->intercept_leave = 0` 跳过本次 leave；没有安装 `onLeave` 时设置这个字段没有意义。
+
+CModule 默认注入这些头：`stdint.h`, `stddef.h`, `stdbool.h`, `string.h`, `rfhook.h`。`rfhook.h` 暴露 `HookContext`、`RfHookCallback` 和 `hook_invoke_trampoline()`：
+
+```c
+typedef struct {
+    uint64_t x[31];
+    uint64_t sp;
+    uint64_t pc;
+    uint64_t nzcv;
+    void *trampoline;
+    uint64_t d[8];
+    uint64_t intercept_leave;
+} HookContext;
+
+typedef void (*RfHookCallback)(HookContext *ctx, void *user_data);
+uint64_t hook_invoke_trampoline(HookContext *ctx, void *trampoline);
+```
+
+也可以把 JS 侧找到的 native symbol 传给 CModule：
+
+```js
+var cm = new CModule(`
+    extern int puts(const char *);
+
+    void say_hi(void) {
+        puts("hello from CModule");
+    }
+`, {
+    puts: Module.findExportByName("libc.so", "puts")
+});
+
+new NativeFunction(cm.say_hi, "void", [])();
+```
+
+调试符号：
+
+```js
+console.log(cm.base, cm.size);
+console.log(cm.findSymbolByName("on_enter"));
+cm.dropMetadata();     // 可选：释放 TinyCC 元数据；函数代码仍保留到 CModule 被 GC
+```
 
 ### Interceptor（Frida 兼容双阶段）
 
@@ -562,11 +709,14 @@ Interceptor.flush();           // no-op，兼容脚本
 | 看返回值或改返回值 | `Interceptor.attach(target, { onLeave })` | 自动执行 | `retval.replace(v)` 改返回值 |
 | 有时跳过原函数 | `hook(target, fn)` | 手动 `this.orig()` | 适合条件分支、绕过、完整替换 |
 | Frida replace 风格 | `Interceptor.replace(target, fn)` | 手动 | 等价于 `hook(target, fn)` |
+| 高频 C callback | `attachNative(target, {onEnter, onLeave})` | 自动执行 | CModule 热路径，支持 onEnter/onLeave |
+| 高频完整替换 | `hookNative(target, callback)` | 手动 | CModule replace，回调内按需 `hook_invoke_trampoline(ctx, ctx->trampoline)` |
 
 选择建议：
 
 - 只改参数并继续跑原函数：优先用 `Interceptor.attach(..., { onEnter })`。
-- 需要“有时调原函数、有时直接返回”：用 `hook()` / `Interceptor.replace()`，在回调里显式 `this.orig(...)`。
+- 需要“有时调原函数、有时直接返回”：用 `hook()` / `Interceptor.replace()`，在回调里显式 `this.orig()`。
+- 固定调原函数：用 `Interceptor.attach` / `attachNative`，无 `onLeave` 时直接 tail-jump 原函数，不再回到 hook 代码。
 - 高频热路径不要无条件 `this.orig()` 透传；这种场景 `attach onEnter` 更省，或者把逻辑下沉到 DSL / native fast path。
 
 ### Stealth 模式
@@ -589,6 +739,10 @@ hook(target, callback, true)            // true = WXSHADOW
 | `Interceptor.replace(target, replacement, stealth?)` | `AddressLike, Function, number?` | `boolean` |
 | `Interceptor.detachAll()` | — | `undefined` |
 | `listener.detach()` | — | `boolean` |
+| `CModule(source, symbols?)` | `string, Object?` | `CModule` |
+| `hookNative(target, callbackPtr, data?, stealth?)` | `AddressLike, NativePointer, AddressLike?, number?` | `NativePointer` trampoline |
+| `attachNative(target, callbackPtr, data?, stealth?)` | `AddressLike, NativePointer, AddressLike?, number?` | `boolean` |
+| `attachNative(target, {onEnter?, onLeave?, data?, mode?})` | `AddressLike, Object` | `boolean` |
 | `callNative(func, ...args)` | `AddressLike, ...AddressLike` (最多6个) | `number \| bigint` |
 | `new NativeFunction(addr, retType, argTypes)` | `AddressLike, string, string[]` | `Function` (可调用，任意签名) |
 | `diagAllocNear(addr)` | `AddressLike` | `undefined` |
@@ -1187,20 +1341,21 @@ Jni.structs.jvalue.readArray(addr, typesOrSig)      // → any[]
 ### 实战：监控 RegisterNatives
 
 ```js
-hook(Jni.addr("RegisterNatives"), function(env, clazz, methods_ptr, count) {
-    var cls = Jni.env.getClassName(clazz);
-    var n = Number(count);
-    console.log(cls + " (" + n + " methods)");
+Interceptor.attach(Jni.addr("RegisterNatives"), {
+    onEnter(args) {
+        var cls = Jni.env.getClassName(args[1]);
+        var n = Number(args[3]);
+        console.log(cls + " (" + n + " methods)");
 
-    var methods = Jni.structs.JNINativeMethod.readArray(ptr(methods_ptr), n);
-    for (var i = 0; i < methods.length; i++) {
-        var m = methods[i];
-        var mod = Module.findByAddress(m.fnPtr);
-        var where = mod === null ? m.fnPtr.toString() : mod.name + "+" + m.fnPtr.sub(mod.base);
-        console.log("  " + (m.name || "<null>") + " " + (m.sig || "<null>") + " → " + where);
+        var methods = Jni.structs.JNINativeMethod.readArray(args[2], n);
+        for (var i = 0; i < methods.length; i++) {
+            var m = methods[i];
+            var mod = Module.findByAddress(m.fnPtr);
+            var where = mod === null ? m.fnPtr.toString() : mod.name + "+" + m.fnPtr.sub(mod.base);
+            console.log("  " + (m.name || "<null>") + " " + (m.sig || "<null>") + " → " + where);
+        }
     }
-    return this.orig();
-}, 1);
+}, Hook.WXSHADOW);
 ```
 
 ---
@@ -1464,7 +1619,7 @@ Trace 文件默认输出到 `/data/data/<package>/trace_bundle.pb`，配合 qbdi
 
 ## 注意事项
 
-- **Native hook 回调签名：** `function(a, b, c) { ... }`，`arguments[0..7]` = x0..x7 (BigInt)、`this` = register 上下文（`this.x0..x30` / `this.sp` / `this.pc` / `this.orig()`）；改参数 `this.x0 = v` 或 `this.orig(newArg0, newArg1)`；`return value` 覆盖返回值
+- **Native hook 回调签名：** `function(a, b, c) { ... }`，`arguments[0..7]` = x0..x7 (BigInt)、`this` = register 上下文（`this.x0..x30` / `this.sp` / `this.pc` / `this.orig()`）；改参数先写 `this.xN = v`，再 `this.orig()`；`return value` 覆盖返回值
 - **Java hook 回调签名：** `function(a, b, c) { ... }`，`this` = 实例（静态方法为 class 载体）、`arguments` = Java 参数、`this.$orig(...)` = 原方法；`return value` 改返回值
 - **Java 字段访问必须用 `.value`：** `obj.field` 返回 FieldWrapper，`obj.field.value` 才是真实值
 - **`Java.choose` 的 wrapper 仅在 `onMatch` 内有效**，跨回调保留需要自己提取字段值

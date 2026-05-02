@@ -43,6 +43,7 @@
 
 // hook(addr, fn, stealth?) — Frida 风格回调包装
 //   fn(arg0, arg1, ..., arg7) { this.x0, this.orig(), ... }
+//   固定执行原函数的场景用 Interceptor.attach；hook()/orig() 只用于条件性调用或替换。
 //     arguments[0..7] = x0..x7 (ARM64 ABI 前 8 个整型参数)
 //     this = register context，含 x0-x30 / sp / pc / orig() / trampoline
 //   recompHook 同样处理。
