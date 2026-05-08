@@ -17,6 +17,7 @@
     var _enumerateInstances = Java._enumerateInstances;
     var _releaseInstanceRefs = Java._releaseInstanceRefs;
     var _methodListCache = Object.create(null);
+    var _classLoaderListCache = null;
     delete Java.hook;
     delete Java.unhook;
     delete Java._methods;
@@ -1406,8 +1407,41 @@
         _readyCallbacks.push(fn);
     };
 
+    function _getClassLoaders() {
+        if (_classLoaderListCache === null) {
+            _classLoaderListCache = _classLoaders();
+        }
+        return _classLoaderListCache;
+    }
+
     Java.classLoaders = function() {
-        return _classLoaders();
+        return _getClassLoaders();
+    };
+
+    Java.enumerateClassLoadersSync = function() {
+        return _getClassLoaders();
+    };
+
+    Java.enumerateClassLoaders = function(callbacks) {
+        if (!callbacks || typeof callbacks !== "object") {
+            throw new Error("Java.enumerateClassLoaders(callbacks) requires a callbacks object");
+        }
+        if (callbacks.onMatch !== undefined && typeof callbacks.onMatch !== "function") {
+            throw new Error("Java.enumerateClassLoaders: callbacks.onMatch must be a function");
+        }
+        if (callbacks.onComplete !== undefined && typeof callbacks.onComplete !== "function") {
+            throw new Error("Java.enumerateClassLoaders: callbacks.onComplete must be a function");
+        }
+
+        var loaders = _getClassLoaders();
+        for (var i = 0; i < loaders.length; i++) {
+            if (callbacks.onMatch && callbacks.onMatch(loaders[i]) === "stop") {
+                break;
+            }
+        }
+        if (callbacks.onComplete) {
+            callbacks.onComplete();
+        }
     };
 
     function _normalizeLoaderArg(loader) {

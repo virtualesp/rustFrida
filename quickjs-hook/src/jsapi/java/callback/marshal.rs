@@ -61,6 +61,10 @@ fn jni_object_sig_to_class_name(jni_sig: &str) -> String {
 }
 
 unsafe fn get_runtime_class_name(env: JniEnv, obj: *mut std::ffi::c_void) -> Option<String> {
+    if REFLECT_IDS.get().is_none() && !in_java_hook_callback() {
+        super::lazy_init_reflect_cache();
+    }
+
     let reflect = REFLECT_IDS.get()?;
     let get_object_class: GetObjectClassFn = jni_fn!(env, GetObjectClassFn, JNI_GET_OBJECT_CLASS);
     let call_obj: CallObjectMethodAFn = jni_fn!(env, CallObjectMethodAFn, JNI_CALL_OBJECT_METHOD_A);
