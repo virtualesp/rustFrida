@@ -1381,6 +1381,15 @@ pub(super) unsafe fn restore_art_method_fields(data: &JavaHookData) {
 
 /// 移除 Layer 3 per-method inline hook + stealth2 revert_slot_patch。
 pub(super) unsafe fn remove_per_method_hook(data: &JavaHookData) {
+    if data.quick_trampoline == 0 {
+        // Standalone shared-stub routers are written directly into ArtMethod.entry_point_.
+        // They are not installed with hook_install_art_router(), so hook_remove(target)
+        // would treat generated pool code as an inline hook site. restore_art_method_fields()
+        // restores entry_point_ to original_entry_point; the generated stub remains owned by
+        // the hook engine pool for the current agent lifetime.
+        return;
+    }
+
     match &data.hook_type {
         callback::HookType::Replaced {
             per_method_hook_target, ..

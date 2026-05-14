@@ -12,7 +12,7 @@ use quickjs_hook::{
     cleanup_engine, cleanup_wxshadow_patches, complete_script, cut_art_controller_routing_hooks,
     cut_art_controller_walkstack_guards, cut_java_hooks, cut_native_hooks, detach_current_jni_thread,
     drain_thunk_in_flight, free_art_controller_state, free_java_hooks, free_native_hooks, get_or_init_engine,
-    init_hook_engine, java_subsystem_active_for_cleanup, load_script, load_script_with_filename,
+    init_hook_engine, load_script, load_script_with_filename,
     set_art_controller_reload_paused, set_console_callback, set_qbdi_helper_blob, set_qbdi_output_dir,
 };
 #[cfg(feature = "qbdi")]
@@ -302,7 +302,11 @@ pub fn cleanup() {
 
     let mut protected_ranges = hook_engine_exec_ranges();
     let retained_recomp_ranges = crate::recompiler::get_retained_ranges();
-    let scan_stack_for_art_frames = java_subsystem_active_for_cleanup() || !retained_recomp_ranges.is_empty();
+    // Java router/replacement execution is covered by g_thunk_in_flight before
+    // we reach this safepoint. Scanning every thread's live stack from a signal
+    // handler is too invasive for apps with crash/anti-debug components, so only
+    // enable full stack scanning when recomp pages are retained.
+    let scan_stack_for_art_frames = !retained_recomp_ranges.is_empty();
     protected_ranges.extend(retained_recomp_ranges);
     if !protected_ranges.is_empty() {
         log_msg(format!(
@@ -340,7 +344,7 @@ pub fn cleanup() {
     stage("phase4 release_guard_recomp", &mut t);
     let mut post_guard_ranges = hook_engine_exec_ranges();
     let post_guard_recomp_ranges = crate::recompiler::get_retained_ranges();
-    let post_guard_scan_stack = java_subsystem_active_for_cleanup() || !post_guard_recomp_ranges.is_empty();
+    let post_guard_scan_stack = !post_guard_recomp_ranges.is_empty();
     post_guard_ranges.extend(post_guard_recomp_ranges);
     let post_guard_clean = if post_guard_scan_stack {
         crate::safepoint::wait_until_clean(&post_guard_ranges, 30_000)

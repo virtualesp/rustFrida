@@ -1235,6 +1235,73 @@ static void emit_art_router_found_path(Arm64Writer* w, uint64_t lbl_found,
     emit_art_router_quick_callback_path(w, lbl_quick, lbl_not_found, trampoline_target);
 }
 
+static void emit_restore_args_only(Arm64Writer* w);
+static void emit_restore_quick_callee_without_lr(Arm64Writer* w);
+static void emit_restore_callee_and_pop(Arm64Writer* w);
+
+/* Standalone shared-stub variant.
+ *
+ * The ArtMethod entry_point points directly at this generated stub, so there is
+ * no inline trampoline to remove and no relocated quickCode to return through.
+ * Keep g_thunk_in_flight held until the JNI replacement returns, otherwise full
+ * cleanup can free the replacement ArtMethod or munmap the hook pool while a
+ * replacement quick frame is still active.
+ */
+static void emit_art_router_found_path_standalone(Arm64Writer* w, uint64_t lbl_found,
+                                                   uint32_t quickcode_offset,
+                                                   uint64_t lbl_not_found) {
+    arm64_writer_put_label(w, lbl_found);
+
+    emit_art_router_inc_counter(w, &g_art_router_hit_count);
+    emit_art_router_inc_counter(w, &g_art_router_replacement_hit_count);
+    arm64_writer_put_ldr_reg_u64(w, ARM64_REG_X17, (uint64_t)&g_art_router_last_hit_x0);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X0, ARM64_REG_X16, 0);
+    arm64_writer_put_str_reg_reg_offset(w, ARM64_REG_X0, ARM64_REG_X17, 0);
+
+    /* X16 = table entry, X17 = replacement ArtMethod*. */
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_X16, 8);
+    arm64_writer_put_str_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_SP, 0);
+
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X20, ARM64_REG_X16);
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X21, ARM64_REG_X17);
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X0, ARM64_REG_X17);
+    arm64_writer_put_ldr_reg_u64(w, ARM64_REG_X16, (uint64_t)art_router_stack_check);
+    arm64_writer_put_blr_reg(w, ARM64_REG_X16);
+    uint64_t lbl_found_continue = arm64_writer_new_label_id(w);
+    arm64_writer_put_cbnz_reg_label(w, ARM64_REG_X0, lbl_found_continue);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_X20, 0);
+    arm64_writer_put_str_reg_reg_offset(w, ARM64_REG_X17, ARM64_REG_SP, 0);
+    arm64_writer_put_b_label(w, lbl_not_found);
+    arm64_writer_put_label(w, lbl_found_continue);
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X16, ARM64_REG_X20);
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X17, ARM64_REG_X21);
+
+    uint64_t lbl_after_declaring_class_sync = arm64_writer_new_label_id(w);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X0, ARM64_REG_X16, 16);
+    arm64_writer_put_mov_reg_imm(w, ARM64_REG_X1, 4);
+    arm64_writer_put_cmp_reg_reg(w, ARM64_REG_X0, ARM64_REG_X1);
+    arm64_writer_put_b_cond_label(w, ARM64_COND_EQ, lbl_after_declaring_class_sync);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X0, ARM64_REG_X16, 0);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_W0, ARM64_REG_X0, 0);
+    arm64_writer_put_str_reg_reg_offset(w, ARM64_REG_W0, ARM64_REG_X17, 0);
+    arm64_writer_put_label(w, lbl_after_declaring_class_sync);
+
+    /* Call replacement.entry_point_ with the caller's quick ABI state restored,
+     * while keeping the router frame on stack so ART stack walking sees the
+     * native replacement at SP+0 during the call. */
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X16, ARM64_REG_X17, quickcode_offset);
+    emit_restore_args_only(w);
+    arm64_writer_put_ldr_reg_reg_offset(w, ARM64_REG_X0, ARM64_REG_SP, 0);
+    emit_restore_quick_callee_without_lr(w);
+    arm64_writer_put_blr_reg(w, ARM64_REG_X16);
+
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X16, ARM64_REG_X0);
+    emit_restore_callee_and_pop(w);
+    arm64_writer_put_mov_reg_reg(w, ARM64_REG_X0, ARM64_REG_X16);
+    emit_thunk_inflight_dec(w);
+    arm64_writer_put_ret(w);
+}
+
 /* Not-found path: 对标 Frida — 恢复全部寄存器 → relocated original instructions → jump back.
  * Shared by generate_art_router_thunk and hook_create_art_router_stub. */
 static void emit_art_router_not_found_path(Arm64Writer* w, uint64_t lbl_not_found,
@@ -2124,8 +2191,8 @@ void* hook_create_art_router_stub(uint64_t fallback_target,
 
     uint64_t lbl_found, lbl_not_found;
     emit_art_router_scan_loop(&w, &lbl_found, &lbl_not_found);
-    emit_art_router_found_path(&w, lbl_found, quickcode_offset, 0,
-                               lbl_not_found, fallback_target);
+    emit_art_router_found_path_standalone(&w, lbl_found, quickcode_offset,
+                                          lbl_not_found);
 
     /* === not_found path: jump to fallback === */
     emit_art_router_not_found_path(&w, lbl_not_found, fallback_target);

@@ -9,7 +9,8 @@ pub(super) enum HookType {
     /// Unified replacement hook (art_router swaps ArtMethod*)
     /// - replacement_addr: heap-allocated replacement ArtMethod (native, jniCode=thunk)
     /// - per_method_hook_target: Some(quickCode) for compiled methods (Layer 3 router hook),
-    ///   None for shared stub methods (routed via Layer 1/2)
+    ///   Some(standalone stub) for shared stubs not covered by Layer 1, and None for
+    ///   shared stub methods routed via Layer 1/2.
     Replaced {
         replacement_addr: usize,
         per_method_hook_target: Option<u64>,
