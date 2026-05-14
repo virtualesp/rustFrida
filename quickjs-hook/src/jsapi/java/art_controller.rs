@@ -1544,10 +1544,21 @@ unsafe fn synchronize_replacement_methods() {
             }
         } else {
             // 编译方法: entry_point 应为 original_entry_point (已被 inline hook 修改)
+            // Standalone shared-stub routers write their generated stub directly
+            // to entry_point_; in that case per_method_hook_target is the
+            // expected entry value.
             // 但 GC/类初始化可能将 ep 重置为 nterp → 降级为 interpreter_bridge
             let current_ep = read_entry_point(data.art_method, ep_offset);
-            if current_ep != data.original_entry_point {
-                if nterp != 0 && current_ep == nterp && interp_bridge != 0 {
+            if current_ep != data.original_entry_point && Some(current_ep) != *per_method_hook_target {
+                if let Some(expected_ep) = *per_method_hook_target {
+                    if expected_ep != data.original_entry_point {
+                        std::ptr::write_volatile((art_method + ep_offset) as *mut u64, expected_ep);
+                    } else if nterp != 0 && current_ep == nterp && interp_bridge != 0 {
+                        std::ptr::write_volatile((art_method + ep_offset) as *mut u64, interp_bridge);
+                    } else {
+                        std::ptr::write_volatile((art_method + ep_offset) as *mut u64, data.original_entry_point);
+                    }
+                } else if nterp != 0 && current_ep == nterp && interp_bridge != 0 {
                     std::ptr::write_volatile((art_method + ep_offset) as *mut u64, interp_bridge);
                 } else {
                     std::ptr::write_volatile((art_method + ep_offset) as *mut u64, data.original_entry_point);

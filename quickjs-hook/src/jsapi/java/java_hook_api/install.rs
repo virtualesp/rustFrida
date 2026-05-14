@@ -220,12 +220,15 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
         ));
     }
     let has_independent_code = !is_art_quick_entrypoint(original_entry_point, bridge);
-    let is_constructor = method_name == "<init>";
     let enable_fast_orig = false;
+    let is_native_method = (original_access_flags & K_ACC_NATIVE) != 0;
+    let is_shared_jni_entry = original_entry_point == bridge.quick_generic_jni_trampoline
+        || (bridge.resolved_jni_entrypoint != 0 && original_entry_point == bridge.resolved_jni_entrypoint);
+    let force_standalone_stub = is_native_method && is_shared_jni_entry;
 
     output_verbose(&format!(
-        "[java hook] Step 4: has_independent_code={} (ep={:#x})",
-        has_independent_code, original_entry_point
+        "[java hook] Step 4: has_independent_code={} native={} shared_jni={} (ep={:#x})",
+        has_independent_code, is_native_method, is_shared_jni_entry, original_entry_point
     ));
 
     // Clone+Replace 模式 (对标 Frida):
@@ -295,7 +298,7 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
         ep_offset,
         env,
         art_method,
-        is_constructor,
+        force_standalone_stub,
         enable_fast_orig,
     ) {
         Ok(v) => v,

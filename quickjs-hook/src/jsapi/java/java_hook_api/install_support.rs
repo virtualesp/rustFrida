@@ -283,7 +283,7 @@ pub(super) unsafe fn install_per_method_router_hook(
     ep_offset: usize,
     env: JniEnv,
     art_method: u64,
-    _force_interpreter_route: bool,
+    force_standalone_stub: bool,
     enable_fast_orig: bool,
 ) -> Result<(Option<u64>, u64, bool, Option<u64>), String> {
     if has_independent_code {
@@ -350,6 +350,23 @@ pub(super) unsafe fn install_per_method_router_hook(
             || original_entry_point == bridge.quick_resolution_trampoline
             || (resolved_interp != 0 && original_entry_point == resolved_interp)
             || (resolved_res != 0 && original_entry_point == resolved_res);
+
+        if force_standalone_stub || !is_already_routed {
+            let stub = hook_ffi::hook_create_art_router_stub(original_entry_point, ep_offset as u32) as u64;
+            if stub == 0 {
+                return Err(format!(
+                    "hook_create_art_router_stub failed for shared entry {:#x}",
+                    original_entry_point
+                ));
+            }
+            std::ptr::write_volatile((art_method as usize + ep_offset) as *mut u64, stub);
+            hook_ffi::hook_flush_cache((art_method as usize + ep_offset) as *mut std::ffi::c_void, 8);
+            output_verbose(&format!(
+                "[java hook] Step 9: standalone shared-stub router installed: ep={:#x} -> stub={:#x}, forced={}",
+                original_entry_point, stub, force_standalone_stub
+            ));
+            return Ok((Some(stub), 0, false, Some(stub)));
+        }
 
         if !is_already_routed && interp_bridge != 0 {
             // DeoptimizeBootImage + forced_interpret_only 已确保方法走 interpreter → DoCall (Layer 2)
