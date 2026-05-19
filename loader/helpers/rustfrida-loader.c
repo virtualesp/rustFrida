@@ -261,7 +261,7 @@ __attribute__ ((visibility ("default")))
 void
 frida_load (RustFridaLoaderContext * ctx)
 {
-  const size_t stack_size = 128 * 1024;
+  const size_t stack_size = 1024 * 1024;
   const size_t flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
   void * stack;
   void * stack_top;

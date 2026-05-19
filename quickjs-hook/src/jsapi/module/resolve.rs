@@ -286,6 +286,43 @@ pub(crate) unsafe fn libart_dlsym(name: &str) -> *mut std::ffi::c_void {
     std::ptr::null_mut()
 }
 
+/// Resolve a libart symbol by name substring from .symtab/.dynsym.
+///
+/// This is used for ART internals whose mangled signatures drift across Android
+/// releases while the stable semantic name remains present.
+pub(crate) unsafe fn libart_find_symbol_contains(needle: &str) -> Option<(String, u64)> {
+    let &(libart_base, _) = LIBART_RANGE.get_or_init(probe_libart_range);
+    if libart_base == 0 || needle.is_empty() {
+        return None;
+    }
+
+    let path = match LIBART_PATH.get() {
+        Some(Some(path)) => path.clone(),
+        _ => match find_module_path_and_base("libart.so") {
+            Some((path, _)) => path,
+            None => return None,
+        },
+    };
+
+    let symbols = elf_module_enumerate_symbols(&path, libart_base);
+    let mut fallback: Option<(String, u64)> = None;
+    for symbol in symbols {
+        if symbol.address == 0 || !symbol.is_defined || symbol.kind != "function" {
+            continue;
+        }
+        if !symbol.name.contains(needle) {
+            continue;
+        }
+        if symbol.name.contains("CodeInfo") {
+            return Some((symbol.name, symbol.address));
+        }
+        if fallback.is_none() {
+            fallback = Some((symbol.name, symbol.address));
+        }
+    }
+    fallback
+}
+
 /// 在多个候选符号中查找第一个可用的（通过 libart_dlsym）
 pub(crate) unsafe fn dlsym_first_match(candidates: &[&str]) -> u64 {
     for &sym_name in candidates {

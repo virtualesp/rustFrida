@@ -22,8 +22,9 @@ use crate::communication::{send_command, start_socketpair_handler};
 use crate::injection::inject_via_bootstrapper;
 use crate::process::find_pid_by_name;
 use crate::repl::{
-    preconfigure_java_stealth_if_declared, print_eval_result, print_help, run_js_repl, script_uses_java_api,
-    try_jseval_on_main_thread_if_java, try_loadjs_on_main_thread_if_java,
+    preconfigure_java_stealth_if_declared, print_eval_result, print_help, rewrite_jseval_for_agent, run_js_repl,
+    script_uses_java_api, try_jseval_on_main_thread_if_java, try_loadjs_on_main_thread_if_java,
+    try_managedcounter_on_main_thread,
 };
 use crate::session::{Session, SessionManager};
 use crate::spawn;
@@ -193,6 +194,7 @@ fn shutdown_session(session: &Session) {
     if session.disconnected.load(Ordering::Acquire) {
         return;
     }
+    session.shutdown_requested.store(true, Ordering::Release);
     let _ = send_command(sender, "shutdown");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while !session.disconnected.load(Ordering::Acquire) {
@@ -340,6 +342,7 @@ fn run_session_repl(session: &Arc<Session>) -> bool {
 
     let send_shutdown = |s: &Session| {
         if let Some(sender) = s.get_sender() {
+            s.shutdown_requested.store(true, Ordering::Release);
             if let Err(e) = send_command(sender, "shutdown") {
                 log_error!("发送 shutdown 失败: {}", e);
             } else {
@@ -396,6 +399,7 @@ fn run_session_repl(session: &Arc<Session>) -> bool {
                     || line.starts_with("loadjs ")
                     || line == "jsinit"
                     || line == "jsclean"
+                    || line.starts_with("managedcounter ")
                     || is_recomp;
 
                 if is_eval_cmd {
@@ -410,22 +414,30 @@ fn run_session_repl(session: &Arc<Session>) -> bool {
                         break;
                     }
                 };
-                let handled_by_main_thread =
-                    match try_loadjs_on_main_thread_if_java(session, &line).and_then(|handled| {
+                let handled_by_main_thread = match try_managedcounter_on_main_thread(session, &line)
+                    .and_then(|handled| {
+                        if handled {
+                            Ok(true)
+                        } else {
+                            try_loadjs_on_main_thread_if_java(session, &line)
+                        }
+                    })
+                    .and_then(|handled| {
                         if handled {
                             Ok(true)
                         } else {
                             try_jseval_on_main_thread_if_java(session, &line)
                         }
                     }) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            log_error!("{}", e);
-                            continue;
-                        }
-                    };
+                    Ok(v) => v,
+                    Err(e) => {
+                        log_error!("{}", e);
+                        continue;
+                    }
+                };
                 if !handled_by_main_thread {
-                    match send_command(sender, &line) {
+                    let command = rewrite_jseval_for_agent(&line).unwrap_or_else(|| line.clone());
+                    match send_command(sender, &command) {
                         Ok(_) => {}
                         Err(e) => {
                             log_error!("发送命令失败: {}", e);

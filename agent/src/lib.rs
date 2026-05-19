@@ -32,7 +32,7 @@ mod quickjs_loader;
 mod stalker;
 
 use crate::communication::{
-    flush_cached_logs, is_cmd_frame, is_qbdi_helper_frame, log_msg, read_frame, register_stream_fd, send_bye,
+    flush_cached_logs, is_cmd_frame, is_qbdi_helper_frame, log_msg, log_msg_sync, register_stream_fd, send_bye,
     send_complete, send_eval_err, send_eval_ok, send_hello, send_rpc_err, send_rpc_ok, shutdown_log_writer,
     shutdown_stream, start_log_writer, write_stream, GLOBAL_STREAM,
 };
@@ -44,8 +44,8 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
 use std::process;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 #[no_mangle]
 pub extern "C" fn rust_get_hide_result() -> *const c_void {
@@ -96,11 +96,25 @@ impl StringTable {
 }
 
 static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+static SHOULD_DETACH: AtomicBool = AtomicBool::new(false);
 pub static OUTPUT_PATH: OnceLock<String> = OnceLock::new();
-type AgentTask = Box<dyn FnOnce() + Send + 'static>;
-static JS_WORKER_TX: Mutex<Option<mpsc::Sender<AgentTask>>> = Mutex::new(None);
 #[cfg(feature = "quickjs")]
-static JS_WORKER_STOPPED: AtomicBool = AtomicBool::new(true);
+static JS_TASKS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+fn read_exact_raw_fd(fd: i32, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let n = unsafe { libc::read(fd, buf[done..].as_mut_ptr() as *mut libc::c_void, buf.len() - done) };
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "socket eof"));
+        }
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        done += n as usize;
+    }
+    Ok(())
+}
 
 /// 注入参数结构体（与 rust_frida/src/types.rs 和 loader.c 完全一致）
 #[repr(C)]
@@ -152,10 +166,21 @@ pub extern "C" fn hello_entry(args_ptr: *mut c_void) -> *mut c_void {
     flush_cached_logs();
 
     let mut reader = sock;
+    let reader_fd_for_raw = reader.as_raw_fd();
     loop {
-        match read_frame(&mut reader) {
+        let mut header = [0u8; 5];
+        match read_exact_raw_fd(reader_fd_for_raw, &mut header).and_then(|_| {
+            let kind = header[0];
+            let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]]) as usize;
+            let mut payload = vec![0u8; len];
+            read_exact_raw_fd(reader_fd_for_raw, &mut payload)?;
+            Ok((kind, payload))
+        }) {
             Ok((kind, payload)) => {
                 if is_cmd_frame(kind) {
+                    if payload.is_empty() {
+                        continue;
+                    }
                     let cmd = String::from_utf8_lossy(&payload).trim().to_string();
                     if !cmd.is_empty() {
                         process_cmd(&cmd);
@@ -166,7 +191,7 @@ pub extern "C" fn hello_entry(args_ptr: *mut c_void) -> *mut c_void {
                 } else {
                     write_stream(format!("未知 frame kind: {}", kind).as_bytes());
                 }
-                if SHOULD_EXIT.load(Ordering::Relaxed) {
+                if SHOULD_EXIT.load(Ordering::Relaxed) || SHOULD_DETACH.load(Ordering::Relaxed) {
                     break;
                 }
             }
@@ -178,16 +203,28 @@ pub extern "C" fn hello_entry(args_ptr: *mut c_void) -> *mut c_void {
             }
         }
     }
-    cleanup_agent_runtime_for_unload();
-    #[cfg(feature = "quickjs")]
-    stop_js_worker_for_unload();
+    if SHOULD_EXIT.load(Ordering::Relaxed) {
+        log_msg_sync("收到 shutdown，开始退出清理\n".to_string());
+    } else if SHOULD_DETACH.load(Ordering::Relaxed) {
+        log_msg_sync("收到 detach，跳过目标进程内清理，准备关闭 socket\n".to_string());
+    }
+    if SHOULD_EXIT.load(Ordering::Relaxed) {
+        #[cfg(feature = "quickjs")]
+        stop_js_worker_for_unload();
+        cleanup_agent_runtime_for_unload();
+    }
+    if SHOULD_EXIT.load(Ordering::Relaxed) {
+        log_msg_sync("退出清理完成，准备关闭 socket\n".to_string());
+    } else if SHOULD_DETACH.load(Ordering::Relaxed) {
+        log_msg_sync("detach 完成，准备关闭 socket\n".to_string());
+    }
     shutdown_log_writer();
     send_bye();
     // 关闭 socket，host 收到 EOF 自然退出
     let reader_fd = reader.as_raw_fd();
     shutdown_stream();
     unsafe {
-        libc::shutdown(reader_fd, libc::SHUT_RDWR);
+        libc::shutdown(reader_fd, libc::SHUT_RD);
         libc::close(reader_fd);
     }
     std::mem::forget(reader);
@@ -335,47 +372,30 @@ fn dispatch_js_task<F>(task: F)
 where
     F: FnOnce() + Send + 'static,
 {
-    let sender = {
-        let mut guard = JS_WORKER_TX.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
-            let (tx, rx) = mpsc::channel::<AgentTask>();
-            JS_WORKER_STOPPED.store(false, Ordering::Release);
-            match raw_thread::spawn_detached(b"wwb-js\0", move || {
-                while let Ok(task) = rx.recv() {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
-                }
-                JS_WORKER_STOPPED.store(true, Ordering::Release);
-            }) {
-                Ok(_) => *guard = Some(tx),
-                Err(e) => {
-                    JS_WORKER_STOPPED.store(true, Ordering::Release);
-                    send_eval_err(&format!("[quickjs] JS worker 启动失败: {}", e));
-                    return;
-                }
-            }
+    JS_TASKS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+    match raw_thread::spawn_detached(b"wwb-js\0", move || {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task));
+        JS_TASKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }) {
+        Ok(_) => {}
+        Err(e) => {
+            JS_TASKS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            send_eval_err(&format!("[quickjs] JS worker 启动失败: {}", e));
         }
-        guard.as_ref().expect("JS worker sender missing").clone()
-    };
-
-    if sender.send(Box::new(task)).is_err() {
-        send_eval_err("[quickjs] JS worker 已退出");
     }
 }
 
 #[cfg(feature = "quickjs")]
 fn stop_js_worker_for_unload() {
-    let dropped = JS_WORKER_TX.lock().unwrap_or_else(|e| e.into_inner()).take().is_some();
-    if dropped {
-        while !JS_WORKER_STOPPED.load(Ordering::Acquire) {
-            raw_thread::sleep_ms(10);
-        }
+    while JS_TASKS_IN_FLIGHT.load(Ordering::Acquire) != 0 {
+        raw_thread::sleep_ms(10);
     }
 }
 
 fn cleanup_agent_runtime_for_unload() {
     #[cfg(feature = "quickjs")]
     if quickjs_loader::is_initialized() {
-        quickjs_loader::cleanup();
+        quickjs_loader::cleanup_for_unload_leak_safe();
     }
     crash_handler::uninstall_crash_handlers();
 }
@@ -466,12 +486,7 @@ fn process_cmd(command: &str) {
         }
         #[cfg(feature = "quickjs")]
         Some("jsworker_stop") => {
-            let dropped = JS_WORKER_TX.lock().unwrap_or_else(|e| e.into_inner()).take().is_some();
-            if dropped {
-                send_eval_ok("jsworker_stopped");
-            } else {
-                send_eval_ok("jsworker_not_running");
-            }
+            send_eval_ok("jsworker_not_persistent");
         }
         // javainit: 延迟 JNI 初始化（spawn 模式 resume 后调用）
         // AttachCurrentThread + cache reflect IDs
@@ -540,6 +555,10 @@ fn process_cmd(command: &str) {
             }
         }
         #[cfg(feature = "quickjs")]
+        Some("managedcounter") => {
+            send_eval_ok("managedcounter requires host main-thread bridge");
+        }
+        #[cfg(feature = "quickjs")]
         Some("jscomplete") => {
             let prefix = command.strip_prefix("jscomplete").unwrap_or("").trim();
             let prefix = prefix.to_string();
@@ -549,16 +568,20 @@ fn process_cmd(command: &str) {
             });
         }
         #[cfg(feature = "quickjs")]
+        Some("jsclean") if !quickjs_loader::is_initialized() => {
+            send_eval_err("[quickjs] JS 引擎未初始化");
+        }
+        #[cfg(feature = "quickjs")]
         Some("jsclean") => dispatch_js_task(|| {
-            if !quickjs_loader::is_initialized() {
-                send_eval_err("[quickjs] JS 引擎未初始化");
-            } else {
-                quickjs_loader::cleanup();
-                send_eval_ok("cleaned up");
-            }
+            quickjs_loader::cleanup();
+            send_eval_ok("cleaned up");
         }),
         // jsclean_soft: %reload 专用。完整 unhook + drain=0 + 销毁 runtime，
         // 但保留 art_controller / pool / recomp / wxshadow（同进程 reload 复用）。
+        #[cfg(feature = "quickjs")]
+        Some("jsclean_soft") if !quickjs_loader::is_initialized() => {
+            send_eval_err("[quickjs] JS 引擎未初始化");
+        }
         #[cfg(feature = "quickjs")]
         Some("jsclean_soft") => dispatch_js_task(|| {
             if !quickjs_loader::is_initialized() {
@@ -627,10 +650,10 @@ fn process_cmd(command: &str) {
         }
         // shutdown — 先完整清理并输出日志，最后由 agent 主动关闭 socket
         Some("shutdown") => {
-            log_msg("收到 shutdown，开始退出清理\n".to_string());
-            cleanup_agent_runtime_for_unload();
-            log_msg("退出清理完成，准备关闭 socket\n".to_string());
             SHOULD_EXIT.store(true, Ordering::Relaxed);
+        }
+        Some("detach") => {
+            SHOULD_DETACH.store(true, Ordering::Relaxed);
         }
         _ => {
             let cmd_name = command.split_whitespace().next().unwrap_or("(empty)");

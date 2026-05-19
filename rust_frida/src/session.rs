@@ -23,6 +23,7 @@ pub(crate) struct Session {
     pub(crate) agent_current_thread_eval_impl: std::sync::atomic::AtomicU64,
     pub(crate) connected: AtomicBool,
     pub(crate) disconnected: AtomicBool,
+    pub(crate) shutdown_requested: AtomicBool,
     pub(crate) failed: AtomicBool,
 }
 
@@ -41,6 +42,7 @@ impl Session {
             agent_current_thread_eval_impl: std::sync::atomic::AtomicU64::new(0),
             connected: AtomicBool::new(false),
             disconnected: AtomicBool::new(false),
+            shutdown_requested: AtomicBool::new(false),
             failed: AtomicBool::new(false),
         }
     }

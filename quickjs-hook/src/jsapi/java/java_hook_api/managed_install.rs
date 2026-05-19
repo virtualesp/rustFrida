@@ -2,9 +2,10 @@ use crate::ffi;
 use crate::jsapi::callback_util::{throw_internal_error, with_registry_mut};
 use crate::jsapi::console::output_message;
 use crate::value::JSValue;
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use super::super::art_controller::{ensure_art_controller_initialized, refresh_walkstack_sigsegv_guard};
 use super::super::art_method::*;
@@ -28,6 +29,39 @@ struct DynamicManagedHelperRefs {
 
 static DYNAMIC_MANAGED_HELPER_REFS: Mutex<Vec<DynamicManagedHelperRefs>> = Mutex::new(Vec::new());
 static DYNAMIC_MANAGED_CLASS_ID: AtomicU64 = AtomicU64::new(1);
+static NATIVE_MANAGED_COUNTERS: OnceLock<Mutex<HashMap<(String, String), Box<AtomicU64>>>> = OnceLock::new();
+
+fn native_counter_registry() -> &'static Mutex<HashMap<(String, String), Box<AtomicU64>>> {
+    NATIVE_MANAGED_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn install_native_counter_ptrs(helper_class: &str, counter_fields: &[String]) -> Vec<*mut u64> {
+    let mut registry = native_counter_registry().lock().unwrap_or_else(|e| e.into_inner());
+    let mut ptrs = Vec::with_capacity(counter_fields.len());
+    for field_name in counter_fields {
+        let counter = registry
+            .entry((helper_class.to_string(), field_name.clone()))
+            .or_insert_with(|| Box::new(AtomicU64::new(0)));
+        ptrs.push(counter.as_ref() as *const AtomicU64 as *mut u64);
+    }
+    ptrs
+}
+
+fn read_native_counter(helper_class: &str, field_name: &str) -> Option<u64> {
+    let registry = NATIVE_MANAGED_COUNTERS.get()?;
+    let registry = registry.lock().unwrap_or_else(|e| e.into_inner());
+    registry.iter().find_map(|((class, field), counter)| {
+        if class == helper_class && field == field_name {
+            Some(counter.load(Ordering::Relaxed))
+        } else {
+            None
+        }
+    })
+}
+
+pub fn managed_native_counter_value(helper_class: &str, field_name: &str) -> Option<u64> {
+    read_native_counter(helper_class, field_name)
+}
 
 unsafe fn load_dynamic_managed_helper_class(
     env: JniEnv,
@@ -641,7 +675,6 @@ unsafe fn install_managed_method_helper(
     } else {
         None
     };
-
     let spec = get_art_method_spec(env, art_method);
     let ep_offset = spec.entry_point_offset;
     let data_off = spec.data_offset;
@@ -797,11 +830,145 @@ unsafe fn install_managed_method_helper(
     Ok(())
 }
 
+unsafe fn install_count_orig_fast_path(
+    env: JniEnv,
+    class_name: &str,
+    method_name: &str,
+    actual_sig: &str,
+    art_method: u64,
+    is_static: bool,
+    helper_class: &str,
+    counter_fields: &[String],
+) -> Result<u64, String> {
+    if counter_fields.is_empty() {
+        return Err("count-orig fast path requires at least one counter".to_string());
+    }
+
+    let spec = get_art_method_spec(env, art_method);
+    let ep_offset = spec.entry_point_offset;
+    let data_off = spec.data_offset;
+    let original_access_flags = std::ptr::read_volatile((art_method as usize + spec.access_flags_offset) as *const u32);
+    let original_data = std::ptr::read_volatile((art_method as usize + data_off) as *const u64);
+    let mut original_entry_point = read_entry_point(art_method, ep_offset);
+    let bridge = find_art_bridge_functions(env, ep_offset);
+
+    if is_art_quick_entrypoint(original_entry_point, bridge) {
+        let compile = compile_art_method_to_quick(env, art_method, ep_offset, bridge, RequestedCompileKind::Auto);
+        output_message(&format!(
+            "[managedHook] compile original {}.{}{} for count-orig: success={} compiled={} before={:#x} after={:#x} {}",
+            class_name,
+            method_name,
+            actual_sig,
+            compile.success,
+            compile.compiled,
+            compile.before,
+            compile.after,
+            compile.message
+        ));
+        original_entry_point = read_entry_point(art_method, ep_offset);
+    }
+    if is_art_quick_entrypoint(original_entry_point, bridge) {
+        return Err(format!(
+            "{}.{}{} still has shared ART entrypoint after compile",
+            class_name, method_name, actual_sig
+        ));
+    }
+
+    let class_global_ref = create_class_global_ref(env, class_name)?;
+    let mut install_guard = JavaHookInstallGuard::new(
+        art_method,
+        spec.access_flags_offset,
+        data_off,
+        ep_offset,
+        original_access_flags,
+        original_data,
+        original_entry_point,
+        class_global_ref,
+    );
+
+    ensure_art_controller_initialized(&bridge, ep_offset, env as *mut std::ffi::c_void);
+    update_original_method_flags_for_hook(art_method, spec.access_flags_offset, original_access_flags);
+    install_guard.set_original_method_mutated();
+
+    let (hook_addr, stealth_flag) =
+        super::super::art_controller::prepare_hook_target(original_entry_point, env as *mut std::ffi::c_void)
+            .map_err(|e| format!("prepare_hook_target: {}", e))?;
+    let mut counter_ptrs = install_native_counter_ptrs(helper_class, counter_fields);
+    let mut hooked_target: *mut std::ffi::c_void = std::ptr::null_mut();
+    let quick_trampoline = crate::ffi::hook::hook_install_count_orig_router(
+        hook_addr as *mut std::ffi::c_void,
+        stealth_flag,
+        env as *mut std::ffi::c_void,
+        &mut hooked_target,
+        counter_ptrs.as_mut_ptr() as *mut *mut u64,
+        counter_ptrs.len() as u32,
+    );
+    if quick_trampoline.is_null() {
+        return Err("hook_install_count_orig_router failed".to_string());
+    }
+    super::super::art_controller::try_fixup_trampoline_pub(quick_trampoline, original_entry_point);
+
+    let per_method_hook_target = if !hooked_target.is_null() {
+        Some(hooked_target as u64)
+    } else {
+        Some(hook_addr)
+    };
+    let quick_trampoline = quick_trampoline as u64;
+    with_registry_mut(&JAVA_HOOK_REGISTRY, |registry| {
+        registry.insert(
+            art_method,
+            JavaHookData {
+                art_method,
+                original_access_flags,
+                original_entry_point,
+                original_data,
+                hook_type: HookType::Managed {
+                    replacement_art_method: 0,
+                    sentinel_addr: 0,
+                    per_method_hook_target,
+                },
+                clone_addr: 0,
+                class_global_ref,
+                return_type: get_return_type_from_sig(actual_sig),
+                return_type_sig: get_return_type_sig(actual_sig),
+                ctx: 0,
+                callback_bytes: [0u8; 16],
+                method_key: method_key(class_name, method_name, actual_sig),
+                is_static,
+                param_count: count_jni_params(actual_sig),
+                param_types: parse_jni_param_types(actual_sig),
+                class_name: class_name.to_string(),
+                quick_trampoline,
+                use_blr: false,
+                native_entry_hook_target: 0,
+                native_entry_trampoline: 0,
+                native_entry_critical: false,
+            },
+        );
+    });
+
+    cache_fields_for_class(env, class_name);
+    output_message(&format!(
+        "[managedHook] installed count-orig fast path {}.{}{} counters={} original={:#x}, trampoline={:#x}",
+        class_name,
+        method_name,
+        actual_sig,
+        counter_fields.len(),
+        art_method,
+        quick_trampoline
+    ));
+
+    install_guard.commit();
+    Ok(quick_trampoline)
+}
+
 struct ManagedDslInstallResult {
     helper_class: String,
     helper_method: String,
     helper_signature: String,
     uses_orig: bool,
+    optimized_passthrough: bool,
+    optimized_native_count_orig: bool,
     counters: Vec<GeneratedCounter>,
     message_channels: Vec<GeneratedMessageChannel>,
     message_capacity: i32,
@@ -840,18 +1007,64 @@ unsafe fn install_managed_dsl_inner(
     let helper_method = generated.method_name.clone();
     let helper_signature = generated.method_sig.clone();
     let uses_orig = generated.uses_orig;
+    let optimized_passthrough = generated.orig_only_passthrough;
+    let optimized_native_count_orig = !generated.fast_tail_orig_counter_fields.is_empty();
     let counters = generated.counters.clone();
     let message_channels = generated.message_channels.clone();
     let message_capacity = generated.message_capacity;
     output_message(&format!(
-        "[managedHook] generated generic DSL dex class={} target={}.{}{} static={} dexSize={}",
+        "[managedHook] generated generic DSL dex class={} target={}.{}{} static={} fastTailOrig={} origOnlyPassthrough={} nativeCountOrig={} dexSize={}",
         generated.class_name,
         class_name,
         method_name,
         sig,
         is_static,
+        generated.fast_tail_orig,
+        generated.orig_only_passthrough,
+        optimized_native_count_orig,
         generated.dex.len()
     ));
+    if generated.orig_only_passthrough {
+        output_message(&format!(
+            "[managedHook] optimized {}.{}{} return-orig DSL as pass-through; no method patch installed",
+            class_name, method_name, sig
+        ));
+        return Ok(ManagedDslInstallResult {
+            helper_class,
+            helper_method,
+            helper_signature,
+            uses_orig,
+            optimized_passthrough,
+            optimized_native_count_orig: false,
+            counters,
+            message_channels,
+            message_capacity,
+        });
+    }
+    if optimized_native_count_orig {
+        install_count_orig_fast_path(
+            env,
+            class_name,
+            method_name,
+            sig,
+            art_method,
+            is_static,
+            &helper_class,
+            &generated.fast_tail_orig_counter_fields,
+        )?;
+        refresh_walkstack_sigsegv_guard();
+        return Ok(ManagedDslInstallResult {
+            helper_class,
+            helper_method,
+            helper_signature,
+            uses_orig,
+            optimized_passthrough,
+            optimized_native_count_orig,
+            counters,
+            message_channels,
+            message_capacity,
+        });
+    }
     let helper_cls = load_dynamic_managed_helper_class(env, generated.dex, &generated.class_name)?;
     register_managed_guard_helpers(env, helper_cls)?;
     initialize_generated_string_literals(env, helper_cls, &generated.string_literals)?;
@@ -881,6 +1094,8 @@ unsafe fn install_managed_dsl_inner(
         helper_method,
         helper_signature,
         uses_orig,
+        optimized_passthrough,
+        optimized_native_count_orig,
         counters,
         message_channels,
         message_capacity,
@@ -1033,6 +1248,12 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_managed_hook_dsl(
     obj.set_property(ctx, "helperMethod", JSValue::string(ctx, &result.helper_method));
     obj.set_property(ctx, "helperSignature", JSValue::string(ctx, &result.helper_signature));
     obj.set_property(ctx, "usesOrig", JSValue::bool(result.uses_orig));
+    obj.set_property(ctx, "optimizedPassThrough", JSValue::bool(result.optimized_passthrough));
+    obj.set_property(
+        ctx,
+        "optimizedNativeCountOrig",
+        JSValue::bool(result.optimized_native_count_orig),
+    );
     let counters = JSValue(ffi::JS_NewObject(ctx));
     for counter in result.counters {
         counters.set_property(ctx, &counter.name, JSValue::string(ctx, &counter.field_name));
@@ -1233,6 +1454,9 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_managed_read_counter(
     let Some(field_name) = JSValue(*argv.add(1)).to_string(ctx) else {
         return throw_internal_error(ctx, "managedReadCounter fieldName must be a string");
     };
+    if let Some(value) = read_native_counter(&helper_class, &field_name) {
+        return ffi::JS_NewBigUint64(ctx, value);
+    }
     let Some(helper_cls) = find_dynamic_managed_helper_class(&helper_class) else {
         return throw_internal_error(ctx, format!("managed helper class not found: {}", helper_class));
     };

@@ -61,6 +61,12 @@ pub(crate) fn write_stream(data: &[u8]) {
     }
 }
 
+pub(crate) fn write_stream_sync(data: &[u8]) {
+    if let Some(m) = GLOBAL_STREAM.get() {
+        let _ = write_frame(&mut m.lock().unwrap_or_else(|e| e.into_inner()), FRAME_KIND_LOG, data);
+    }
+}
+
 pub(crate) fn shutdown_log_writer() {}
 
 /// 直接通过原始 fd 写 socket，供崩溃处理等场景使用。
@@ -168,13 +174,23 @@ pub(crate) fn log_msg(msg: String) {
     }
 }
 
-/// 关闭 socket 连接，通知 host 收到 EOF 自然退出
+pub(crate) fn log_msg_sync(msg: String) {
+    let prefixed = format!("[agent] {}", msg);
+    if GLOBAL_STREAM.get().is_some() {
+        write_stream_sync(prefixed.as_bytes());
+    } else if let Ok(mut cache) = CACHE_LOG.lock() {
+        cache.push(prefixed);
+    }
+}
+
+/// 关闭 socket 写端。用 SHUT_WR 保留已排队的 LOG/BYE frame，避免 host 读到 reset。
 pub(crate) fn shutdown_stream() {
-    // 不拿 GLOBAL_STREAM mutex；退出路径必须保证不会被日志/控制帧锁阻塞。
-    if let Some(fd) = GLOBAL_STREAM_FD.get() {
+    if let Some(m) = GLOBAL_STREAM.get() {
+        let mut stream = m.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = stream.flush();
+        let fd = stream.as_raw_fd();
         unsafe {
-            libc::shutdown(*fd, libc::SHUT_RDWR);
-            libc::close(*fd);
+            libc::shutdown(fd, libc::SHUT_WR);
         }
     }
 }

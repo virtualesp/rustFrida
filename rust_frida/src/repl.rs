@@ -14,6 +14,8 @@ use crate::logger::{GRAY, GREEN, HIGHLIGHT_BG, HIGHLIGHT_FG, RED, RESET, YELLOW}
 use crate::session::Session;
 use crate::{log_error, log_info, log_warn};
 
+const JSEVAL_ERROR_PREFIX: &str = "__RF_JSEVAL_ERROR__:";
+
 fn script_filename(script_path: &str) -> String {
     std::path::Path::new(script_path)
         .file_name()
@@ -77,9 +79,66 @@ pub(crate) fn try_jseval_on_main_thread_if_java(session: &Session, line: &str) -
     }
 
     log_info!("检测到 Java jseval，切到目标主线程执行");
-    crate::remote_agent::eval_js_on_main_thread(session, expr, "", false)
+    let expr = wrap_jseval_expr(expr);
+    crate::remote_agent::eval_js_on_main_thread(session, &expr, "", false)
         .map_err(|e| format!("主线程执行 jseval 失败: {}", e))?;
     Ok(true)
+}
+
+fn js_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub(crate) fn try_managedcounter_on_main_thread(session: &Session, line: &str) -> Result<bool, String> {
+    let Some(rest) = line.strip_prefix("managedcounter ") else {
+        return Ok(false);
+    };
+    let mut parts = rest.split_whitespace();
+    let helper_class = parts.next().unwrap_or("");
+    let field_name = parts.next().unwrap_or("");
+    if helper_class.is_empty() || field_name.is_empty() || parts.next().is_some() {
+        return Err("用法: managedcounter <helperClass> <fieldName>".to_string());
+    }
+
+    log_info!("managedcounter 切到目标主线程读取");
+    let expr = format!(
+        "(() => {{ try {{ return String(Java.managedReadCounter({}, {})); }} catch (e) {{ return '[managedcounter error] ' + String(e); }} }})()",
+        js_string_literal(helper_class),
+        js_string_literal(field_name)
+    );
+    crate::remote_agent::eval_js_on_main_thread(session, &expr, "", false)
+        .map_err(|e| format!("主线程读取 managedcounter 失败: {}", e))?;
+    Ok(true)
+}
+
+fn wrap_jseval_expr(expr: &str) -> String {
+    format!(
+        "(() => {{ try {{ return eval({}); }} catch (e) {{ let msg = String((e && e.message) ? ((e.name || 'Error') + ': ' + e.message) : e); let st = ''; try {{ st = (e && e.stack) ? String(e.stack) : ''; }} catch (_) {{}} let s = st ? (st.indexOf(msg) >= 0 ? st : (msg + '\\n' + st)) : msg; return {} + s; }} }})()",
+        js_string_literal(expr),
+        js_string_literal(JSEVAL_ERROR_PREFIX)
+    )
+}
+
+pub(crate) fn rewrite_jseval_for_agent(line: &str) -> Option<String> {
+    let expr = line
+        .strip_prefix("jseval ")
+        .or_else(|| line.strip_prefix("jseval\n"))
+        .or_else(|| line.strip_prefix("jseval"))?;
+    Some(format!("jseval {}", wrap_jseval_expr(expr)))
 }
 
 pub(crate) enum PreResumeLoad {
@@ -487,7 +546,12 @@ pub(crate) fn print_eval_result(session: &Session, timeout_secs: u64) {
             "[timeout] 等待执行结果超时",
         ),
         Some(Ok(output)) => {
-            if !output.is_empty() {
+            if let Some(err) = output.strip_prefix(JSEVAL_ERROR_PREFIX) {
+                crate::logger::stdout_line(
+                    &format!("{RED}[JS error] {}{RESET}", err),
+                    &format!("[JS error] {}", err),
+                );
+            } else if !output.is_empty() {
                 crate::logger::stdout_line(&format!("{GREEN}=> {}{RESET}", output), &format!("=> {}", output));
             }
         }

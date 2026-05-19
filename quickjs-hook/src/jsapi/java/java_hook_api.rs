@@ -11,5 +11,6 @@ mod uninstall;
 
 pub(super) use fast_install::{js_fast_hook, js_fast_hook_check, js_fast_hook_signature, js_fast_hook_stats};
 pub(super) use install::{js_java_hook, js_java_hook_quick};
+pub use managed_install::managed_native_counter_value;
 pub(super) use managed_install::{js_managed_drain_messages, js_managed_hook_dsl, js_managed_read_counter};
 pub(super) use uninstall::js_java_unhook;

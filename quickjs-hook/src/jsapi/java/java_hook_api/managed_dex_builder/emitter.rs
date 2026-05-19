@@ -53,6 +53,7 @@ pub(super) struct DslBuildContext {
     invoke_frame_words: u16,
     invoke_frame_count: u16,
     invoke_depth: u16,
+    managed_guard_enabled: bool,
     target_narrow_types: BTreeMap<DslTargetKey, String>,
     last_descriptor: Option<String>,
     result_descriptor: Option<String>,
@@ -125,6 +126,7 @@ impl DslBuildContext {
             invoke_frame_words,
             invoke_frame_count,
             invoke_depth: 0,
+            managed_guard_enabled: true,
             target_narrow_types: BTreeMap::new(),
             last_descriptor: None,
             result_descriptor: None,
@@ -147,6 +149,10 @@ impl DslBuildContext {
             orig_backup,
             return_type,
         });
+    }
+
+    pub(super) fn set_managed_guard_enabled(&mut self, enabled: bool) {
+        self.managed_guard_enabled = enabled;
     }
 
     fn int_expr_scratch_reg(&self, index: u16) -> Result<u8, String> {
@@ -4117,6 +4123,50 @@ pub(super) fn program_uses_orig(program: &DslProgram) -> bool {
     statements_use_orig(&program.stmts)
 }
 
+fn orig_args_are_original(args: &DslOrigArgs, param_count: usize) -> bool {
+    match args {
+        DslOrigArgs::Original => true,
+        DslOrigArgs::Values(values) => values.len() == param_count
+            && values.iter().enumerate().all(
+                |(index, value)| matches!(value, DslValue::Target(DslTarget::Arg(arg_index)) if *arg_index == index),
+            ),
+    }
+}
+
+pub(super) fn program_fast_tail_orig(program: &DslProgram, param_count: usize) -> bool {
+    let Some((last, prefix)) = program.stmts.split_last() else {
+        return false;
+    };
+    let DslStmt::ReturnOrig { args } = last else {
+        return false;
+    };
+    if !orig_args_are_original(args, param_count) {
+        return false;
+    }
+    prefix.iter().all(|stmt| matches!(stmt, DslStmt::Count { .. }))
+}
+
+pub(super) fn program_orig_only_passthrough(program: &DslProgram, param_count: usize) -> bool {
+    match program.stmts.as_slice() {
+        [DslStmt::ReturnOrig { args }] => orig_args_are_original(args, param_count),
+        _ => false,
+    }
+}
+
+pub(super) fn program_fast_tail_orig_count_names(program: &DslProgram, param_count: usize) -> Option<Vec<String>> {
+    if !program_fast_tail_orig(program, param_count) || program_orig_only_passthrough(program, param_count) {
+        return None;
+    }
+    let mut names = Vec::new();
+    for stmt in &program.stmts[..program.stmts.len().saturating_sub(1)] {
+        let DslStmt::Count { name } = stmt else {
+            return None;
+        };
+        names.push(name.clone());
+    }
+    (!names.is_empty()).then_some(names)
+}
+
 fn statements_use_orig(stmts: &[DslStmt]) -> bool {
     stmts.iter().any(stmt_uses_orig)
 }
@@ -4553,10 +4603,16 @@ fn emit_return_value(
 }
 
 pub(super) fn emit_managed_guard_enter(ir: &mut DexIrBuilder, dsl_ctx: &DslBuildContext) {
+    if !dsl_ctx.managed_guard_enabled {
+        return;
+    }
     ir.invoke_static(Vec::new(), dsl_ctx.guard_enter_method());
 }
 
 pub(super) fn emit_managed_guard_leave(ir: &mut DexIrBuilder, dsl_ctx: &DslBuildContext) {
+    if !dsl_ctx.managed_guard_enabled {
+        return;
+    }
     ir.invoke_static(Vec::new(), dsl_ctx.guard_leave_method());
 }
 

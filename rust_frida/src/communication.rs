@@ -1,5 +1,6 @@
 #![cfg(all(target_os = "android", target_arch = "aarch64"))]
 
+use std::io::ErrorKind;
 use std::io::{Read, Write};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -251,6 +252,19 @@ fn handle_socket_connection(stream: UnixStream, session: Arc<Session>) {
                 } else {
                     log_error!("[#{}] Agent 连接已断开", session.id);
                 }
+                session.disconnected.store(true, Ordering::Release);
+                break;
+            }
+            Err(e)
+                if session.shutdown_requested.load(Ordering::Acquire)
+                    && matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::UnexpectedEof
+                    ) =>
+            {
                 session.disconnected.store(true, Ordering::Release);
                 break;
             }

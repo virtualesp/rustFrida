@@ -85,6 +85,9 @@ pub(super) struct GeneratedManagedDex {
     pub method_sig: String,
     pub orig_backup_name: Option<String>,
     pub orig_backup_sig: Option<String>,
+    pub fast_tail_orig: bool,
+    pub orig_only_passthrough: bool,
+    pub fast_tail_orig_counter_fields: Vec<String>,
     pub uses_orig: bool,
     pub string_literals: Vec<GeneratedStringLiteral>,
     pub counters: Vec<GeneratedCounter>,
@@ -540,8 +543,9 @@ fn format_inferred_arg_types(arg_types: &[Option<String>]) -> String {
 mod emitter;
 use emitter::{
     collect_local_slots, emit_managed_guard_enter, emit_managed_guard_leave, emit_statements, helper_param_layout,
-    precollect_string_literals, program_array_literal_scratch_count, program_int_expr_scratch_count,
-    program_max_invoke_depth, program_max_invoke_words, program_uses_orig, DslBuildContext, EmitContext,
+    precollect_string_literals, program_array_literal_scratch_count, program_fast_tail_orig,
+    program_fast_tail_orig_count_names, program_int_expr_scratch_count, program_max_invoke_depth,
+    program_max_invoke_words, program_orig_only_passthrough, program_uses_orig, DslBuildContext, EmitContext,
     BASE_LOCAL_REG_COUNT,
 };
 
@@ -561,6 +565,9 @@ pub(super) unsafe fn build_managed_dsl_dex(
     let target_type = java_class_to_descriptor(target_class_name)?;
     let object_type = "Ljava/lang/Object;".to_string();
     let (target_params, return_type) = parse_method_signature(target_sig)?;
+    let fast_tail_orig = program_fast_tail_orig(&program, target_params.len());
+    let orig_only_passthrough = program_orig_only_passthrough(&program, target_params.len());
+    let fast_tail_orig_count_names = program_fast_tail_orig_count_names(&program, target_params.len());
     let local_descriptors = validate_semantics(
         env,
         &program,
@@ -632,12 +639,16 @@ pub(super) unsafe fn build_managed_dsl_dex(
         max_invoke_depth,
     );
     precollect_string_literals(&program, &mut dsl_ctx);
+    if fast_tail_orig {
+        dsl_ctx.set_managed_guard_enabled(false);
+    }
     let target = MethodRef::new(
         target_type.clone(),
         target_method_name.to_string(),
         return_type.clone(),
         target_params.clone(),
     );
+    let target_is_interface = !is_static && descriptor_is_interface(env, &target_type);
     let orig_backup_name = "__rf_orig".to_string();
     let orig_backup_sig = build_method_sig(&helper_params, &return_type);
     let orig_backup = MethodRef::new(
@@ -657,7 +668,6 @@ pub(super) unsafe fn build_managed_dsl_dex(
     }
     let mut ir = DexIrBuilder::new(registers_size, ins_size, outs_size);
     let layout = helper_param_layout(is_static, &target_type, &target_params, local_count, local_slots)?;
-    let target_is_interface = !is_static && descriptor_is_interface(env, &target_type);
     emit_managed_guard_enter(&mut ir, &dsl_ctx);
     let guard_try_start = ir.new_label();
     let guard_try_end = ir.new_label();
@@ -825,6 +835,18 @@ pub(super) unsafe fn build_managed_dsl_dex(
         builder.add_method_ref(orig_backup);
     }
     let dex = builder.build()?;
+    let fast_tail_orig_counter_fields = fast_tail_orig_count_names
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| {
+            dsl_ctx
+                .counters
+                .iter()
+                .find(|counter| counter.name == name)
+                .map(|counter| counter.field_name.clone())
+                .ok_or_else(|| format!("fast-tail counter not generated: {}", name))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(GeneratedManagedDex {
         dex,
@@ -833,6 +855,9 @@ pub(super) unsafe fn build_managed_dsl_dex(
         method_sig: build_method_sig(&helper_params, &return_type),
         orig_backup_name: uses_orig.then_some(orig_backup_name),
         orig_backup_sig: uses_orig.then_some(orig_backup_sig),
+        fast_tail_orig,
+        orig_only_passthrough,
+        fast_tail_orig_counter_fields,
         uses_orig,
         string_literals: dsl_ctx.string_literals,
         counters: dsl_ctx.counters,

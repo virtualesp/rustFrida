@@ -36,8 +36,9 @@ use communication::{send_command, start_socketpair_handler};
 use injection::{inject_via_bootstrapper, watch_and_inject, InjectionResult};
 use process::find_pid_by_name;
 use repl::{
-    load_script_file, load_script_file_pre_resume, print_eval_result, print_help, run_js_repl,
-    try_jseval_on_main_thread_if_java, try_loadjs_on_main_thread_if_java, CommandCompleter, PreResumeLoad,
+    load_script_file, load_script_file_pre_resume, print_eval_result, print_help, rewrite_jseval_for_agent,
+    run_js_repl, try_jseval_on_main_thread_if_java, try_loadjs_on_main_thread_if_java,
+    try_managedcounter_on_main_thread, CommandCompleter, PreResumeLoad,
 };
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -352,6 +353,7 @@ fn main() {
     // 发送 shutdown 到 agent，随后等待 agent 完整清理并主动关闭 socket
     let send_shutdown = |s: &Session| {
         if let Some(sender) = s.get_sender() {
+            s.shutdown_requested.store(true, Ordering::Release);
             if let Err(e) = send_command(sender, "shutdown") {
                 log_error!("发送 shutdown 失败: {}", e);
             } else {
@@ -429,26 +431,35 @@ fn main() {
                     || line.starts_with("loadjs ")
                     || line == "jsinit"
                     || line == "jsclean"
+                    || line.starts_with("managedcounter ")
                     || is_recomp;
                 if is_eval_cmd {
                     session.eval_state.clear();
                 }
-                let handled_by_main_thread =
-                    match try_loadjs_on_main_thread_if_java(&session, &line).and_then(|handled| {
+                let handled_by_main_thread = match try_managedcounter_on_main_thread(&session, &line)
+                    .and_then(|handled| {
+                        if handled {
+                            Ok(true)
+                        } else {
+                            try_loadjs_on_main_thread_if_java(&session, &line)
+                        }
+                    })
+                    .and_then(|handled| {
                         if handled {
                             Ok(true)
                         } else {
                             try_jseval_on_main_thread_if_java(&session, &line)
                         }
                     }) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            log_error!("{}", e);
-                            continue;
-                        }
-                    };
+                    Ok(v) => v,
+                    Err(e) => {
+                        log_error!("{}", e);
+                        continue;
+                    }
+                };
                 if !handled_by_main_thread {
-                    match send_command(sender, &line) {
+                    let command = rewrite_jseval_for_agent(&line).unwrap_or_else(|| line.clone());
+                    match send_command(sender, &command) {
                         Ok(_) => {}
                         Err(e) => {
                             log_error!("发送命令失败: {}", e);
@@ -475,11 +486,6 @@ fn main() {
 
     let _ = rl.save_history(".rustfrida_history");
 
-    // Spawn 模式：退出前还原 Zygote patch
-    if args.spawn.is_some() {
-        spawn::cleanup_zygote_patches();
-    }
-
     // 等待 agent 完成清理并主动关闭 socket (disconnected=true)。
     // cleanup 里 drain thunk_in_flight 可能耗时 (HashMap.put 高频场景 1~2 分钟)。
     // 不设硬超时：agent 清理完才算真正退出，否则 munmap pool 未完成，app 仍可能崩。
@@ -497,5 +503,10 @@ fn main() {
     let total = start.elapsed();
     if total.as_secs() >= 10 {
         log_info!("agent 已断开 (总耗时 {}s)", total.as_secs());
+    }
+
+    // Spawn 模式：agent 完整退出后再还原 Zygote patch，避免两个清理流程交错。
+    if args.spawn.is_some() {
+        spawn::cleanup_zygote_patches();
     }
 }

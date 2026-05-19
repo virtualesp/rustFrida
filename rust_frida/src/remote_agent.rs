@@ -4,6 +4,7 @@ use nix::sys::ptrace;
 use nix::unistd::Pid;
 use std::sync::atomic::Ordering;
 
+use crate::log_verbose;
 use crate::process::{attach_to_process, call_target_function, read_memory, write_bytes};
 use crate::session::Session;
 use crate::types::{FridaLibcApi, RustFridaLoaderContext};
@@ -34,6 +35,9 @@ pub(crate) fn eval_js_on_main_thread(
         init_engine,
     );
     let detach_result = ptrace::detach(Pid::from_raw(pid), None).map_err(|e| e.to_string());
+    if detach_result.is_ok() {
+        ensure_target_continued(pid);
+    }
     match (result, detach_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(e), _) => Err(e),
@@ -106,4 +110,12 @@ fn eval_js_attached(
 
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
+}
+
+fn ensure_target_continued(pid: i32) {
+    let ret = unsafe { libc::kill(pid, libc::SIGCONT) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        log_verbose!("remote eval SIGCONT {} 失败: {}", pid, err);
+    }
 }

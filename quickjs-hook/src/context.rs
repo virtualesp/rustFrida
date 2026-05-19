@@ -93,26 +93,23 @@ impl JSContext {
         unsafe {
             let exception = ffi::JS_GetException(self.ptr.as_ptr());
             let exc_val = JSValue(exception);
-
-            // Get the error message
             let message = exc_val
                 .to_string(self.ptr.as_ptr())
                 .unwrap_or_else(|| "Unknown error".to_string());
-
-            // Try to get stack trace
             let stack = exc_val.get_property(self.ptr.as_ptr(), "stack");
             let stack_str = if !stack.is_undefined() {
                 stack.to_string(self.ptr.as_ptr()).unwrap_or_default()
             } else {
                 String::new()
             };
-
-            // Free values
-            exc_val.free(self.ptr.as_ptr());
             stack.free(self.ptr.as_ptr());
+            exc_val.free(self.ptr.as_ptr());
 
-            if stack_str.is_empty() {
+            let stack_str = stack_str.trim();
+            if stack_str.is_empty() || stack_str == message {
                 message
+            } else if stack_str.contains(&message) {
+                stack_str.to_string()
             } else {
                 format!("{}\n{}", message, stack_str)
             }

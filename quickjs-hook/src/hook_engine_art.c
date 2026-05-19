@@ -1876,7 +1876,13 @@ static size_t generate_managed_direct_thunk(void* thunk_mem, size_t thunk_alloc,
     arm64_writer_put_ldr_reg_u64(&w, ARM64_REG_X16, helper_entry);
     /* Tail-call the generated managed helper. Keeping LR unchanged makes the
      * helper return to the original Java caller, so no hook-pool return PC is
-     * exposed to ART stack walking during allocation/GC. */
+     * exposed to ART stack walking during allocation/GC.
+     *
+     * Cleanup must not rely on g_thunk_in_flight alone for managed-direct DSL:
+     * once we decrement here, the generated helper and its orig() call may
+     * still be executing. A separate helper-side active counter is needed for
+     * exact cut -> drain -> free semantics without exposing hook-pool LR.
+    */
     emit_thunk_inflight_dec_regs(&w, ARM64_REG_X14, ARM64_REG_X15);
     arm64_writer_put_br_reg(&w, ARM64_REG_X16);
 
@@ -1953,6 +1959,119 @@ void* hook_install_managed_direct_router(void* target,
     }
 
     if (patch_target(target, entry->thunk, stealth, entry) != 0) {
+        free_entry(entry);
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    finalize_hook(entry, entry->thunk, thunk_size);
+    pthread_mutex_unlock(&g_engine.lock);
+    return entry->trampoline;
+}
+
+static size_t generate_count_orig_thunk(void* thunk_mem, size_t thunk_alloc,
+                                        void* trampoline_target,
+                                        volatile uint64_t** counters,
+                                        uint32_t counter_count) {
+    if (thunk_alloc < FAKE_OAT_PREFIX_SIZE + 512 || !trampoline_target || !counters || counter_count == 0) return 0;
+
+    void* body_mem = (uint8_t*)thunk_mem + FAKE_OAT_PREFIX_SIZE;
+    size_t body_alloc = thunk_alloc - FAKE_OAT_PREFIX_SIZE;
+
+    Arm64Writer w;
+    arm64_writer_init(&w, body_mem, (uint64_t)body_mem, body_alloc);
+
+    /* Use the same ART-visible frame layout as the generic router. The fake
+     * OAT CodeInfo below describes ROUTER_FRAME_SIZE and its spill masks; a
+     * smaller private scratch frame makes suspend/GC stack walking decode the
+     * count thunk with the wrong SP and can crash when the counter is read. */
+    emit_art_router_prologue(&w);
+
+    for (uint32_t i = 0; i < counter_count; i++) {
+        if (counters[i]) {
+            emit_atomic_inc64(&w, counters[i]);
+        }
+    }
+
+    emit_art_router_restore_all(&w);
+
+    arm64_writer_put_ldr_reg_u64(&w, ARM64_REG_X16, (uint64_t)trampoline_target);
+    arm64_writer_put_br_reg(&w, ARM64_REG_X16);
+
+    if (arm64_writer_flush(&w) != 0) {
+        hook_log("[count_orig] label resolution failed");
+        return 0;
+    }
+    size_t body_size = arm64_writer_offset(&w);
+    arm64_writer_clear(&w);
+
+    backfill_fake_oat_header(thunk_mem, (uint32_t)body_alloc);
+    hook_flush_cache(thunk_mem, FAKE_OAT_PREFIX_SIZE + body_size);
+    hook_log("[count_orig] thunk body_size=%zu counters=%u trampoline=%p",
+             body_size, counter_count, trampoline_target);
+    return FAKE_OAT_PREFIX_SIZE + body_size;
+}
+
+void* hook_install_count_orig_router(void* target,
+                                     int stealth,
+                                     void* jni_env,
+                                     void** out_hooked_target,
+                                     volatile uint64_t** counters,
+                                     uint32_t counter_count) {
+    if (!g_engine.initialized || !target || !counters || counter_count == 0) {
+        return NULL;
+    }
+
+    void* resolved = resolve_art_trampoline(target, jni_env);
+    if (resolved != target) {
+        target = resolved;
+    }
+    if (out_hooked_target) {
+        *out_hooked_target = target;
+    }
+
+    pthread_mutex_lock(&g_engine.lock);
+
+    HookEntry* existing = find_hook(target);
+    if (existing) {
+        void* trampoline = existing->trampoline;
+        pthread_mutex_unlock(&g_engine.lock);
+        return trampoline;
+    }
+
+    HookEntry* entry = setup_hook_entry(target);
+    if (!entry) {
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    size_t thunk_alloc = 4096;
+    if (!entry->thunk || entry->thunk_alloc < thunk_alloc) {
+        entry->thunk = hook_alloc_near(thunk_alloc, target);
+        entry->thunk_alloc = thunk_alloc;
+    }
+    if (!entry->thunk) {
+        free_entry(entry);
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    if (build_trampoline(entry, 0) < 0) {
+        free_entry(entry);
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    size_t thunk_size = generate_count_orig_thunk(
+        entry->thunk, thunk_alloc, entry->trampoline, counters, counter_count);
+    if (thunk_size == 0) {
+        free_entry(entry);
+        pthread_mutex_unlock(&g_engine.lock);
+        return NULL;
+    }
+
+    void* patch_dest = (uint8_t*)entry->thunk + FAKE_OAT_PREFIX_SIZE;
+    if (patch_target(target, patch_dest, stealth, entry) != 0) {
         free_entry(entry);
         pthread_mutex_unlock(&g_engine.lock);
         return NULL;

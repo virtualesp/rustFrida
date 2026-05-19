@@ -18,7 +18,7 @@
 
 use crate::ffi::hook as hook_ffi;
 use crate::jsapi::console::output_verbose;
-use crate::jsapi::module::{libart_dlsym, module_dlsym};
+use crate::jsapi::module::{libart_dlsym, libart_find_symbol_contains, module_dlsym};
 use crate::jsapi::util::{proc_maps_entries, read_proc_self_maps};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -1890,6 +1890,18 @@ unsafe extern "C" fn on_decode_gc_masks_only_enter(ctx: *mut hook_ffi::HookConte
     }
 }
 
+unsafe fn find_decode_gc_masks_only_entry() -> u64 {
+    if let Some((name, addr)) = libart_find_symbol_contains("DecodeGcMasksOnly") {
+        output_verbose(&format!(
+            "[artController] DecodeGcMasksOnly symbol wildcard hit: {} @ {:#x}",
+            name, addr
+        ));
+        return addr;
+    }
+
+    0
+}
+
 unsafe fn find_decode_gc_masks_only_header_load() -> u64 {
     // Android 16 / API 36 libart DecodeGcMasksOnly prologue through the first
     // OatQuickMethodHeader load. Keep the prologue in the signature; the tail
@@ -1929,29 +1941,30 @@ unsafe fn find_decode_gc_masks_only_header_load() -> u64 {
 }
 
 unsafe fn install_decode_gc_masks_only_null_guard() -> u64 {
-    let target = find_decode_gc_masks_only_header_load();
-    if target == 0 {
+    let load_target = find_decode_gc_masks_only_header_load();
+    if load_target == 0 {
         output_verbose("[artController] DecodeGcMasksOnly NULL guard 跳过: pattern not found");
         return 0;
     }
 
+    let (ha, sf) = prepare_hook_target(load_target, std::ptr::null_mut()).unwrap_or((load_target, 0));
     let ret = hook_ffi::hook_attach(
-        target as *mut std::ffi::c_void,
+        ha as *mut std::ffi::c_void,
         Some(on_decode_gc_masks_only_enter),
         None,
         std::ptr::null_mut(),
-        0,
+        sf,
     );
     if ret == 0 {
         output_verbose(&format!(
-            "[artController] DecodeGcMasksOnly NULL guard 安装成功: load={:#x}",
-            target
+            "[artController] DecodeGcMasksOnly NULL guard 安装成功: load={:#x} (hooked={:#x})",
+            load_target, ha
         ));
-        target
+        ha
     } else {
         output_verbose(&format!(
             "[artController] DecodeGcMasksOnly NULL guard 安装失败: load={:#x}, ret={}",
-            target, ret
+            load_target, ret
         ));
         0
     }

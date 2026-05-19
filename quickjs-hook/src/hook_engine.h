@@ -537,6 +537,13 @@ void* hook_install_managed_direct_router(void* target,
                                          uint64_t original_method,
                                          int set_orig_bypass);
 
+void* hook_install_count_orig_router(void* target,
+                                     int stealth,
+                                     void* jni_env,
+                                     void** out_hooked_target,
+                                     volatile uint64_t** counters,
+                                     uint32_t counter_count);
+
 void* hook_install_managed_direct_entrypoint(void* target,
                                              void* jni_env,
                                              void** out_resolved_target,
