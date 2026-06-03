@@ -27,6 +27,7 @@ use crate::communication::{log_msg, write_stream};
 
 const JAVA_WORKER_EVAL_TIMEOUT_MS: u64 = 60_000;
 const JAVA_WORKER_BUSY_FAST_FAIL_MS: u64 = 500;
+const JAVA_WORKER_LOOP_READY_TIMEOUT_MS: u64 = 1_500;
 
 static ENGINE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static HOOK_RUNTIME_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -286,9 +287,25 @@ fn run_eval_task(script: &str, filename: &str, init_engine: bool) -> Result<Stri
     }
 }
 
+fn wait_java_worker_loop_entered(timeout_ms: u64) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if JAVA_WORKER_LOOP_ENTERED.load(Ordering::Acquire) && JAVA_WORKER_LOOP_RUNNING.load(Ordering::Acquire) {
+            return true;
+        }
+        if start.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
+            return false;
+        }
+        crate::raw_thread::sleep_ms(5);
+    }
+}
+
 pub fn start_java_worker() -> Result<(), String> {
     if JAVA_WORKER_STARTED.load(Ordering::Acquire) {
-        return Ok(());
+        if JAVA_WORKER_LOOP_RUNNING.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        return Err("java worker thread exists but native loop is not running".to_string());
     }
     init_hook_runtime()?;
     set_console_callback(|msg| {
@@ -302,6 +319,14 @@ pub fn start_java_worker() -> Result<(), String> {
         return Err(err);
     }
     JAVA_WORKER_STARTED.store(true, Ordering::Release);
+    if !wait_java_worker_loop_entered(JAVA_WORKER_LOOP_READY_TIMEOUT_MS) {
+        JAVA_WORKER_START_REQUESTED.store(false, Ordering::Release);
+        JAVA_WORKER_STARTED.store(false, Ordering::Release);
+        return Err(format!(
+            "java worker native loop did not enter within {}ms",
+            JAVA_WORKER_LOOP_READY_TIMEOUT_MS
+        ));
+    }
     write_stream(b"[java worker] ready");
     Ok(())
 }
@@ -338,6 +363,9 @@ fn wait_java_worker_stopped(had_worker: bool, timeout_ms: u64) -> bool {
 
 pub fn eval_on_java_worker(script: String, filename: String, init_engine: bool) -> Result<String, String> {
     start_java_worker()?;
+    if !JAVA_WORKER_LOOP_RUNNING.load(Ordering::Acquire) {
+        return Err("Java worker loop is not running".to_string());
+    }
     let queue = JavaWorkerQueue::get();
     if JAVA_WORKER_EVAL_IN_FLIGHT
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

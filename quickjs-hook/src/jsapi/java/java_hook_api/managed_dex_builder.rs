@@ -138,9 +138,15 @@ pub(super) fn build_java_worker_dex(class_id: u64) -> Result<GeneratedJavaWorker
         .super_type("Ljava/lang/Thread;")
         .source_file("RustFridaJavaWorker.java");
 
-    let thread_ctor = MethodRef::new("Ljava/lang/Thread;", "<init>", "V", Vec::new());
-    let mut ctor = DexIrBuilder::new(1, 1, 1);
-    ctor.invoke_direct(vec![0], thread_ctor.clone());
+    let thread_ctor = MethodRef::new(
+        "Ljava/lang/Thread;",
+        "<init>",
+        "V",
+        vec!["Ljava/lang/String;".to_string()],
+    );
+    let mut ctor = DexIrBuilder::new(2, 1, 2);
+    ctor.const_string(0, "wwb-javawoker");
+    ctor.invoke_direct(vec![1, 0], thread_ctor.clone());
     ctor.return_void();
     class.direct_method("<init>", "V", Vec::new(), ACC_PUBLIC | ACC_CONSTRUCTOR, ctor.finish()?);
 
