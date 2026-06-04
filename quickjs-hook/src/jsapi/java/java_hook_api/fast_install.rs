@@ -45,6 +45,12 @@ pub(in crate::jsapi::java) unsafe fn install_fast_hook_with_env(
     let original_data = std::ptr::read_volatile((art_method as usize + data_off) as *const u64);
     let original_entry_point = read_entry_point(art_method, ep_offset);
     let bridge = find_art_bridge_functions(env, ep_offset);
+    if !is_code_pointer(original_entry_point) {
+        return Err(format!(
+            "resolved ArtMethod entry_point is not executable for Java.fastHook {}.{}{} (ArtMethod={:#x}, ep={:#x}, spec={:?})",
+            class_name, method_name, actual_sig, art_method, original_entry_point, spec
+        ));
+    }
     let has_independent_code = !is_art_quick_entrypoint(original_entry_point, bridge);
     if !has_independent_code {
         return Err("Java.fastHook currently requires compiled quick code; use Java.compileMethod() first".to_string());

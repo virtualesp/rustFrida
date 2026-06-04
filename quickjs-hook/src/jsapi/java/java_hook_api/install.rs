@@ -231,6 +231,16 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook(
             original_access_flags, actual_sig
         ));
     }
+    let original_entry_is_code = is_code_pointer(original_entry_point);
+    if !original_entry_is_code {
+        return throw_internal_error(
+            ctx,
+            format!(
+                "resolved ArtMethod entry_point is not executable for {}.{}{} (ArtMethod={:#x}, ep={:#x}, spec={:?})",
+                class_name, method_name, actual_sig, art_method, original_entry_point, spec
+            ),
+        );
+    }
     let has_independent_code = !is_art_quick_entrypoint(original_entry_point, bridge);
     let enable_fast_orig = false;
     let is_native_method = (original_access_flags & K_ACC_NATIVE) != 0;
@@ -574,6 +584,16 @@ pub(in crate::jsapi::java) unsafe extern "C" fn js_java_hook_quick(
         return throw_internal_error(ctx, "failed to find art_quick_generic_jni_trampoline");
     }
 
+    let original_entry_is_code = is_code_pointer(original_entry_point);
+    if !original_entry_is_code {
+        return throw_internal_error(
+            ctx,
+            format!(
+                "resolved ArtMethod entry_point is not executable for Java.hookQuick {}.{}{} (ArtMethod={:#x}, ep={:#x}, spec={:?})",
+                class_name, method_name, actual_sig, art_method, original_entry_point, spec
+            ),
+        );
+    }
     let has_independent_code = !is_art_quick_entrypoint(original_entry_point, bridge);
     if !has_independent_code {
         return throw_internal_error(

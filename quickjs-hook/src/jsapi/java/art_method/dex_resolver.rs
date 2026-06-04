@@ -1062,7 +1062,12 @@ fn resolve_from_methods_array_with_layout(
             ));
         }
 
-        if let Some(spec) = infer_art_method_spec(art_method, method_size, dex_method_index_offset, dex_access_flags) {
+        let Some(spec) =
+            validate_art_method_candidate(art_method, method_size, dex_method_index_offset, dex_access_flags)
+        else {
+            continue;
+        };
+        if ART_METHOD_SPEC.get().is_none() {
             cache_art_method_spec_from_self_parse(spec);
         }
 
@@ -1123,6 +1128,69 @@ fn find_matching_dex_method_index(
     None
 }
 
+fn validate_art_method_candidate(
+    art_method: u64,
+    method_size: usize,
+    dex_method_index_offset: usize,
+    dex_access_flags: u32,
+) -> Option<ArtMethodSpec> {
+    let spec = if let Some(cached) = ART_METHOD_SPEC.get().copied() {
+        cached
+    } else {
+        infer_art_method_spec(art_method, method_size, dex_method_index_offset, dex_access_flags)?
+    };
+
+    if !art_method_candidate_matches_spec(art_method, method_size, &spec, dex_access_flags) {
+        return None;
+    }
+
+    Some(spec)
+}
+
+fn art_method_candidate_matches_spec(
+    art_method: u64,
+    method_size: usize,
+    spec: &ArtMethodSpec,
+    dex_access_flags: u32,
+) -> bool {
+    const DEX_ACCESS_MASK: u32 = 0x0000_ffff;
+
+    if method_size < spec.size
+        || spec.entry_point_offset + 8 > method_size
+        || spec.access_flags_offset + 4 > method_size
+        || !super::safe_mem::is_readable(art_method + spec.entry_point_offset as u64, 8)
+        || !super::safe_mem::is_readable(art_method + spec.access_flags_offset as u64, 4)
+    {
+        output_verbose(&format!(
+            "[dex resolver] reject ArtMethod candidate {:#x}: layout too small (candidate_size={}, spec={:?})",
+            art_method, method_size, spec
+        ));
+        return false;
+    }
+
+    let entry_point = unsafe { super::safe_mem::safe_read_u64(art_method + spec.entry_point_offset as u64) };
+    if !is_code_pointer(entry_point) {
+        output_verbose(&format!(
+            "[dex resolver] reject ArtMethod candidate {:#x}: entry_point at +{} is not executable ({:#x})",
+            art_method, spec.entry_point_offset, entry_point
+        ));
+        return false;
+    }
+
+    let flags = unsafe { super::safe_mem::safe_read_u32(art_method + spec.access_flags_offset as u64) };
+    if (dex_access_flags & DEX_ACCESS_MASK) != 0
+        && (flags & DEX_ACCESS_MASK) != (dex_access_flags & DEX_ACCESS_MASK)
+    {
+        output_verbose(&format!(
+            "[dex resolver] reject ArtMethod candidate {:#x}: access_flags mismatch at +{} runtime={:#x}, dex={:#x}",
+            art_method, spec.access_flags_offset, flags, dex_access_flags
+        ));
+        return false;
+    }
+
+    true
+}
+
 fn infer_art_method_spec(
     art_method: u64,
     method_size: usize,
@@ -1162,12 +1230,11 @@ fn infer_entry_point_offset(art_method: u64, method_size: usize) -> Option<usize
         }
     }
 
-    let fallback = if method_size >= 40 { 24 } else { method_size.checked_sub(8)? };
     output_verbose(&format!(
-        "[art spec] entry_point self-parse fallback: ArtMethod={:#x}, offset={}",
-        art_method, fallback
+        "[art spec] entry_point self-parse rejected: no executable candidate for ArtMethod={:#x}, size={}",
+        art_method, method_size
     ));
-    Some(fallback)
+    None
 }
 
 fn infer_access_flags_offset(

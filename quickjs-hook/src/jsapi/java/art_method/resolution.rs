@@ -52,6 +52,10 @@ pub(crate) fn resolve_art_method(
     force_static: bool,
 ) -> Result<(u64, bool), String> {
     unsafe {
+        if !env.is_null() && !crate::is_raw_clone_js_thread() && is_reflect_ids_ready() {
+            let _ = get_art_method_spec(env, 0);
+        }
+
         if let Some(resolved) = resolve_art_method_by_dex(env, class_name, method_name, signature, force_static) {
             return Ok(resolved);
         }
