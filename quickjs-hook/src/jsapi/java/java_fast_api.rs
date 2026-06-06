@@ -88,6 +88,22 @@ struct ArtCalleeSaveProfile {
     suspend_method_offset: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ArtCalleeSaveDynamicResolution {
+    label: &'static str,
+    method: u64,
+    suspend_method_offset: u64,
+    set_base_offset: Option<u64>,
+    init_sequence_offset: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeRegExpr {
+    Unknown,
+    RuntimePlus(u64),
+    RuntimePlusTypeIndex(u64),
+}
+
 const ART_CALLEE_SAVE_SYMBOLS: &[ArtSymbolCandidate] = &[
     ArtSymbolCandidate {
         label: "getCalleeSaveMethod",
@@ -127,6 +143,17 @@ const ART_CALLEE_SAVE_PROFILES: &[ArtCalleeSaveProfile] = &[ArtCalleeSaveProfile
     max_sdk: 36,
     suspend_method_offset: 0x28,
 }];
+
+const ART_SET_CALLEE_SAVE_METHOD_SYMBOL: &str =
+    "_ZN3art7Runtime19SetCalleeSaveMethodEPNS_9ArtMethodENS_14CalleeSaveTypeE";
+const ART_CREATE_CALLEE_SAVE_METHOD_SYMBOL: &str = "_ZN3art7Runtime22CreateCalleeSaveMethodEv";
+const CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK: u32 = 5;
+const CALLEE_SAVE_METHOD_COUNT: u64 = 6;
+const CALLEE_SAVE_SLOT_SIZE: u64 = 8;
+const CALLEE_SAVE_MAX_RUNTIME_OFFSET: u64 = 0x400;
+const SET_CALLEE_SAVE_SCAN_BYTES: usize = 192;
+const INIT_CALLEE_SAVE_VERIFY_WINDOW: u64 = 0x140;
+const INIT_CALLEE_SAVE_BLOCK_BACK_INSNS: u64 = 12;
 
 const QUICK_ENTRYPOINTS_OFFSET_FAILED: usize = usize::MAX;
 const QUICK_ENTRYPOINT_COUNT: usize = 174;
@@ -260,7 +287,6 @@ pub unsafe extern "C" fn art_quick_top_quick_frame_offset() -> u64 {
 }
 
 unsafe fn resolve_callee_save_suspend_method() -> Option<u64> {
-    const CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK: u32 = 5;
     let runtime = resolve_art_runtime_instance()?;
 
     type GetCalleeSaveMethodFn = unsafe extern "C" fn(*mut std::ffi::c_void, u32) -> *mut std::ffi::c_void;
@@ -280,9 +306,21 @@ unsafe fn resolve_callee_save_suspend_method() -> Option<u64> {
         }
     }
 
-    crate::jsapi::console::output_message(
-        "[fast] ART callee-save exported Runtime::GetCalleeSaveMethod symbols missing; trying profile fallback",
-    );
+    output_verbose("[fast] ART Runtime::GetCalleeSaveMethod not exported; trying dynamic callee-save anchors");
+
+    if let Some(anchor) = probe_callee_save_dynamic_anchor(runtime) {
+        crate::jsapi::console::output_message(&format!(
+            "[fast] ART callee-save suspend method via {}: method={:#x}, runtime_off=0x{:x}, set_base={}, init_seq={}",
+            anchor.label,
+            anchor.method,
+            anchor.suspend_method_offset,
+            fmt_optional_hex(anchor.set_base_offset),
+            fmt_optional_hex(anchor.init_sequence_offset)
+        ));
+        return Some(anchor.method);
+    }
+
+    output_verbose("[fast] ART callee-save dynamic anchors unavailable; trying profile fallback");
 
     if let Some(method) = resolve_callee_save_suspend_method_from_profile(runtime) {
         return Some(method);
@@ -290,6 +328,380 @@ unsafe fn resolve_callee_save_suspend_method() -> Option<u64> {
 
     crate::jsapi::console::output_message("[fast] ART callee-save suspend method unavailable");
     None
+}
+
+unsafe fn probe_callee_save_dynamic_anchor(runtime: *mut std::ffi::c_void) -> Option<ArtCalleeSaveDynamicResolution> {
+    let runtime_addr = runtime as u64;
+    let set_base_offset = decode_callee_save_base_offset_from_setter();
+    let init_sequence_offset = scan_callee_save_suspend_offset_from_runtime_init();
+
+    if let Some(base_offset) = set_base_offset {
+        let suspend_method_offset =
+            base_offset + CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK as u64 * CALLEE_SAVE_SLOT_SIZE;
+        if suspend_method_offset <= CALLEE_SAVE_MAX_RUNTIME_OFFSET
+            && looks_like_callee_save_method_array(runtime_addr, suspend_method_offset)
+        {
+            let method = read_runtime_callee_save_method(runtime_addr, suspend_method_offset);
+            if method != 0 {
+                let label = if init_sequence_offset == Some(suspend_method_offset) {
+                    "setCalleeSaveMethod+runtimeInitSequence"
+                } else {
+                    if let Some(init_offset) = init_sequence_offset {
+                        output_verbose(&format!(
+                            "[fast] ART callee-save init sequence offset 0x{:x} differs from setter offset 0x{:x}",
+                            init_offset, suspend_method_offset
+                        ));
+                    }
+                    "setCalleeSaveMethod"
+                };
+                return Some(ArtCalleeSaveDynamicResolution {
+                    label,
+                    method,
+                    suspend_method_offset,
+                    set_base_offset,
+                    init_sequence_offset,
+                });
+            }
+        } else {
+            output_verbose(&format!(
+                "[fast] ART SetCalleeSaveMethod decoded base offset 0x{:x}, but runtime array validation failed",
+                base_offset
+            ));
+        }
+    }
+
+    if let Some(suspend_method_offset) = init_sequence_offset {
+        if suspend_method_offset <= CALLEE_SAVE_MAX_RUNTIME_OFFSET
+            && looks_like_callee_save_method_array(runtime_addr, suspend_method_offset)
+        {
+            let method = read_runtime_callee_save_method(runtime_addr, suspend_method_offset);
+            if method != 0 {
+                return Some(ArtCalleeSaveDynamicResolution {
+                    label: "runtimeInitSequence",
+                    method,
+                    suspend_method_offset,
+                    set_base_offset,
+                    init_sequence_offset,
+                });
+            }
+        } else {
+            output_verbose(&format!(
+                "[fast] ART callee-save runtime init sequence offset 0x{:x}, but runtime array validation failed",
+                suspend_method_offset
+            ));
+        }
+    }
+
+    None
+}
+
+unsafe fn decode_callee_save_base_offset_from_setter() -> Option<u64> {
+    let setter = crate::jsapi::module::libart_dlsym(ART_SET_CALLEE_SAVE_METHOD_SYMBOL) as u64;
+    if setter == 0 || !crate::jsapi::module::is_in_libart(setter) {
+        return None;
+    }
+
+    let mut regs = [RuntimeRegExpr::Unknown; 32];
+    regs[0] = RuntimeRegExpr::RuntimePlus(0);
+
+    for off in (0..SET_CALLEE_SAVE_SCAN_BYTES).step_by(4) {
+        let instr = std::ptr::read_unaligned((setter + off as u64) as *const u32);
+        if let Some(base_offset) = decode_callee_save_setter_store(instr, &regs) {
+            if base_offset <= CALLEE_SAVE_MAX_RUNTIME_OFFSET {
+                return Some(base_offset);
+            }
+        }
+        update_runtime_reg_exprs(instr, &mut regs);
+    }
+
+    None
+}
+
+fn decode_callee_save_setter_store(instr: u32, regs: &[RuntimeRegExpr; 32]) -> Option<u64> {
+    if let Some((rt, rn, rm, option, scaled)) = decode_str64_register_offset(instr) {
+        if rt == 1 && rm == 2 && scaled && matches!(option, 0b010 | 0b011) {
+            if let RuntimeRegExpr::RuntimePlus(base_offset) = regs[rn as usize] {
+                return Some(base_offset);
+            }
+        }
+    }
+
+    if let Some((rt, rn, imm)) = decode_str64_unsigned_imm(instr) {
+        if rt == 1 {
+            if let RuntimeRegExpr::RuntimePlusTypeIndex(base_offset) = regs[rn as usize] {
+                return base_offset.checked_add(imm);
+            }
+        }
+    }
+
+    None
+}
+
+fn update_runtime_reg_exprs(instr: u32, regs: &mut [RuntimeRegExpr; 32]) {
+    if let Some((rd, rn, imm)) = decode_add64_immediate(instr) {
+        regs[rd as usize] = match regs[rn as usize] {
+            RuntimeRegExpr::RuntimePlus(base) => base
+                .checked_add(imm)
+                .map(RuntimeRegExpr::RuntimePlus)
+                .unwrap_or(RuntimeRegExpr::Unknown),
+            RuntimeRegExpr::RuntimePlusTypeIndex(base) => base
+                .checked_add(imm)
+                .map(RuntimeRegExpr::RuntimePlusTypeIndex)
+                .unwrap_or(RuntimeRegExpr::Unknown),
+            RuntimeRegExpr::Unknown => RuntimeRegExpr::Unknown,
+        };
+        return;
+    }
+
+    if let Some((rd, rn, rm, shift)) = decode_add64_shifted_register(instr) {
+        regs[rd as usize] = if rm == 2 && shift == 3 {
+            match regs[rn as usize] {
+                RuntimeRegExpr::RuntimePlus(base) => RuntimeRegExpr::RuntimePlusTypeIndex(base),
+                _ => RuntimeRegExpr::Unknown,
+            }
+        } else {
+            RuntimeRegExpr::Unknown
+        };
+        return;
+    }
+
+    if let Some((rd, rm)) = decode_mov64_register(instr) {
+        regs[rd as usize] = regs[rm as usize];
+    }
+}
+
+unsafe fn scan_callee_save_suspend_offset_from_runtime_init() -> Option<u64> {
+    for (start, end) in libart_executable_ranges() {
+        if let Some(offset) = scan_callee_save_suspend_offset_in_range(start, end) {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+unsafe fn scan_callee_save_suspend_offset_in_range(start: u64, end: u64) -> Option<u64> {
+    let mut addr = start;
+    while addr + 4 <= end {
+        if decode_callee_save_type_mov(addr).is_some_and(|imm| imm == CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK) {
+            if let Some((base_reg, suspend_offset)) =
+                decode_callee_save_init_block(addr, CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK, start, end)
+            {
+                if suspend_offset >= CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK as u64 * CALLEE_SAVE_SLOT_SIZE
+                    && suspend_offset <= CALLEE_SAVE_MAX_RUNTIME_OFFSET
+                {
+                    let base_offset =
+                        suspend_offset - CALLEE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK as u64 * CALLEE_SAVE_SLOT_SIZE;
+                    if verify_callee_save_init_sequence(addr, base_reg, base_offset, start, end) {
+                        return Some(suspend_offset);
+                    }
+                }
+            }
+        }
+        addr += 4;
+    }
+    None
+}
+
+unsafe fn verify_callee_save_init_sequence(
+    type5_mov_addr: u64,
+    base_reg: u32,
+    base_offset: u64,
+    range_start: u64,
+    range_end: u64,
+) -> bool {
+    let window_start = type5_mov_addr
+        .saturating_sub(INIT_CALLEE_SAVE_VERIFY_WINDOW)
+        .max(range_start);
+    let window_end = type5_mov_addr.saturating_add(16).min(range_end);
+    let mut seen_mask = 0u32;
+    let mut addr = window_start;
+
+    while addr + 4 <= window_end {
+        if let Some(ty) = decode_callee_save_type_mov(addr) {
+            if ty < CALLEE_SAVE_METHOD_COUNT as u32 {
+                if let Some((candidate_base_reg, slot_offset)) =
+                    decode_callee_save_init_block(addr, ty, range_start, range_end)
+                {
+                    if candidate_base_reg == base_reg && slot_offset == base_offset + ty as u64 * CALLEE_SAVE_SLOT_SIZE
+                    {
+                        seen_mask |= 1u32 << ty;
+                    }
+                }
+            }
+        }
+        addr += 4;
+    }
+
+    seen_mask & ((1u32 << CALLEE_SAVE_METHOD_COUNT) - 1) == (1u32 << CALLEE_SAVE_METHOD_COUNT) - 1
+}
+
+unsafe fn decode_callee_save_init_block(
+    mov_w2_addr: u64,
+    expected_type: u32,
+    range_start: u64,
+    range_end: u64,
+) -> Option<(u32, u64)> {
+    if decode_callee_save_type_mov(mov_w2_addr) != Some(expected_type) {
+        return None;
+    }
+    if !has_following_bl(mov_w2_addr, range_end) {
+        return None;
+    }
+
+    let search_start = mov_w2_addr
+        .saturating_sub(INIT_CALLEE_SAVE_BLOCK_BACK_INSNS * 4)
+        .max(range_start);
+    let mut addr = mov_w2_addr;
+    while addr >= search_start + 4 {
+        addr -= 4;
+        let instr = std::ptr::read_unaligned(addr as *const u32);
+        if let Some((_rt, rn, imm)) = decode_ldr64_unsigned_imm(instr) {
+            if rn != 31 && imm % CALLEE_SAVE_SLOT_SIZE == 0 && imm <= CALLEE_SAVE_MAX_RUNTIME_OFFSET {
+                return Some((rn, imm));
+            }
+        }
+    }
+    None
+}
+
+unsafe fn has_following_bl(mov_w2_addr: u64, range_end: u64) -> bool {
+    let mut addr = mov_w2_addr + 4;
+    let end = mov_w2_addr.saturating_add(12).min(range_end);
+    while addr + 4 <= end {
+        let instr = std::ptr::read_unaligned(addr as *const u32);
+        if is_bl_immediate(instr) {
+            return true;
+        }
+        addr += 4;
+    }
+    false
+}
+
+fn libart_executable_ranges() -> Vec<(u64, u64)> {
+    let maps = match crate::jsapi::util::read_proc_self_maps() {
+        Some(maps) => maps,
+        None => return Vec::new(),
+    };
+
+    crate::jsapi::util::proc_maps_entries(&maps)
+        .filter_map(|entry| {
+            let path = entry.path?;
+            let prot = entry.prot_flags();
+            if prot & libc::PROT_READ == 0 || prot & libc::PROT_EXEC == 0 {
+                return None;
+            }
+            if !path.ends_with("/libart.so") {
+                return None;
+            }
+            if !(path.starts_with("/apex/") || path.starts_with("/system/") || path.starts_with("/system_ext/")) {
+                return None;
+            }
+            Some((entry.start, entry.end))
+        })
+        .collect()
+}
+
+fn decode_str64_register_offset(instr: u32) -> Option<(u32, u32, u32, u32, bool)> {
+    if instr & 0x3b60_0c00 != 0x3820_0800 {
+        return None;
+    }
+    let rt = instr & 0x1f;
+    let rn = (instr >> 5) & 0x1f;
+    let scaled = ((instr >> 12) & 1) != 0;
+    let option = (instr >> 13) & 0x7;
+    let rm = (instr >> 16) & 0x1f;
+    Some((rt, rn, rm, option, scaled))
+}
+
+fn decode_str64_unsigned_imm(instr: u32) -> Option<(u32, u32, u64)> {
+    if instr & 0xffc0_0000 != 0xf900_0000 {
+        return None;
+    }
+    let rt = instr & 0x1f;
+    let rn = (instr >> 5) & 0x1f;
+    let imm = ((instr >> 10) & 0xfff) as u64 * 8;
+    Some((rt, rn, imm))
+}
+
+fn decode_ldr64_unsigned_imm(instr: u32) -> Option<(u32, u32, u64)> {
+    if instr & 0xffc0_0000 != 0xf940_0000 {
+        return None;
+    }
+    let rt = instr & 0x1f;
+    let rn = (instr >> 5) & 0x1f;
+    let imm = ((instr >> 10) & 0xfff) as u64 * 8;
+    Some((rt, rn, imm))
+}
+
+fn decode_add64_immediate(instr: u32) -> Option<(u32, u32, u64)> {
+    if instr & 0xffc0_0000 != 0x9100_0000 {
+        return None;
+    }
+    let rd = instr & 0x1f;
+    let rn = (instr >> 5) & 0x1f;
+    let shift = (instr >> 22) & 0x3;
+    if shift > 1 {
+        return None;
+    }
+    let mut imm = ((instr >> 10) & 0xfff) as u64;
+    if shift == 1 {
+        imm <<= 12;
+    }
+    Some((rd, rn, imm))
+}
+
+fn decode_add64_shifted_register(instr: u32) -> Option<(u32, u32, u32, u32)> {
+    if instr & 0xff20_0000 != 0x8b00_0000 {
+        return None;
+    }
+    if (instr >> 22) & 0x3 != 0 {
+        return None;
+    }
+    let rd = instr & 0x1f;
+    let rn = (instr >> 5) & 0x1f;
+    let shift = (instr >> 10) & 0x3f;
+    let rm = (instr >> 16) & 0x1f;
+    Some((rd, rn, rm, shift))
+}
+
+fn decode_mov64_register(instr: u32) -> Option<(u32, u32)> {
+    if instr & 0xffe0_ffe0 != 0xaa00_03e0 {
+        return None;
+    }
+    let rd = instr & 0x1f;
+    let rm = (instr >> 16) & 0x1f;
+    if rd == 31 || rm == 31 {
+        return None;
+    }
+    Some((rd, rm))
+}
+
+unsafe fn decode_callee_save_type_mov(addr: u64) -> Option<u32> {
+    let instr = std::ptr::read_unaligned(addr as *const u32);
+    if instr == 0x2a1f_03e2 {
+        return Some(0);
+    }
+    if instr & 0xffe0_001f != 0x5280_0002 {
+        return None;
+    }
+    if ((instr >> 21) & 0x3) != 0 {
+        return None;
+    }
+    Some((instr >> 5) & 0xffff)
+}
+
+fn is_bl_immediate(instr: u32) -> bool {
+    instr & 0xfc00_0000 == 0x9400_0000
+}
+
+unsafe fn read_runtime_callee_save_method(runtime_addr: u64, suspend_method_offset: u64) -> u64 {
+    std::ptr::read_volatile((runtime_addr + suspend_method_offset) as *const u64) & super::PAC_STRIP_MASK
+}
+
+fn fmt_optional_hex(value: Option<u64>) -> String {
+    value
+        .map(|v| format!("0x{:x}", v))
+        .unwrap_or_else(|| "none".to_string())
 }
 
 unsafe fn resolve_callee_save_suspend_method_from_profile(runtime: *mut std::ffi::c_void) -> Option<u64> {
@@ -301,8 +713,7 @@ unsafe fn resolve_callee_save_suspend_method_from_profile(runtime: *mut std::ffi
             continue;
         }
 
-        let method = std::ptr::read_volatile((runtime_addr + profile.suspend_method_offset) as *const u64)
-            & 0x00ff_ffff_ffff_ffff;
+        let method = read_runtime_callee_save_method(runtime_addr, profile.suspend_method_offset);
         if method == 0 || !looks_like_callee_save_method_array(runtime_addr, profile.suspend_method_offset) {
             continue;
         }
@@ -328,8 +739,7 @@ unsafe fn probe_callee_save_profile_fallback(
             continue;
         }
 
-        let method = std::ptr::read_volatile((runtime_addr + profile.suspend_method_offset) as *const u64)
-            & 0x00ff_ffff_ffff_ffff;
+        let method = read_runtime_callee_save_method(runtime_addr, profile.suspend_method_offset);
         if method != 0 && looks_like_callee_save_method_array(runtime_addr, profile.suspend_method_offset) {
             return Some((profile, method));
         }
@@ -342,7 +752,7 @@ unsafe fn looks_like_callee_save_method_array(runtime: u64, suspend_method_offse
     let first = runtime + suspend_method_offset - 5 * 8;
     let mut previous = 0u64;
     for i in 0..6u64 {
-        let method = std::ptr::read_volatile((first + i * 8) as *const u64) & 0x00ff_ffff_ffff_ffff;
+        let method = std::ptr::read_volatile((first + i * 8) as *const u64) & super::PAC_STRIP_MASK;
         if method == 0 || (method & 0x3) != 0 {
             return false;
         }
@@ -369,6 +779,8 @@ pub(super) unsafe extern "C" fn js_art_symbol_probe(
 
     let runtime_instance = crate::jsapi::module::libart_dlsym("_ZN3art7Runtime9instance_E") as u64;
     let runtime_current = crate::jsapi::module::libart_dlsym("_ZN3art7Runtime7CurrentEv") as u64;
+    let set_callee_save = crate::jsapi::module::libart_dlsym(ART_SET_CALLEE_SAVE_METHOD_SYMBOL) as u64;
+    let create_callee_save = crate::jsapi::module::libart_dlsym(ART_CREATE_CALLEE_SAVE_METHOD_SYMBOL) as u64;
     obj.set_property(
         ctx,
         "runtimeInstanceSymbol",
@@ -378,6 +790,16 @@ pub(super) unsafe extern "C" fn js_art_symbol_probe(
         ctx,
         "runtimeCurrentSymbol",
         JSValue(ffi::JS_NewBigUint64(ctx, runtime_current)),
+    );
+    obj.set_property(
+        ctx,
+        "setCalleeSaveMethodSymbol",
+        JSValue(ffi::JS_NewBigUint64(ctx, set_callee_save)),
+    );
+    obj.set_property(
+        ctx,
+        "createCalleeSaveMethodSymbol",
+        JSValue(ffi::JS_NewBigUint64(ctx, create_callee_save)),
     );
 
     let symbols = JSValue(ffi::JS_NewObject(ctx));
@@ -413,6 +835,52 @@ pub(super) unsafe extern "C" fn js_art_symbol_probe(
         JSValue(ffi::JS_NewBigUint64(ctx, selected_addr)),
     );
 
+    let dynamic = JSValue(ffi::JS_NewObject(ctx));
+    let mut dynamic_valid = false;
+    if let Some(runtime) = resolve_art_runtime_instance() {
+        let runtime_addr = runtime as u64;
+        dynamic.set_property(ctx, "runtime", JSValue(ffi::JS_NewBigUint64(ctx, runtime_addr)));
+        dynamic.set_property(
+            ctx,
+            "setBaseOffset",
+            JSValue(ffi::JS_NewBigUint64(
+                ctx,
+                decode_callee_save_base_offset_from_setter().unwrap_or(u64::MAX),
+            )),
+        );
+        dynamic.set_property(
+            ctx,
+            "initSequenceOffset",
+            JSValue(ffi::JS_NewBigUint64(
+                ctx,
+                scan_callee_save_suspend_offset_from_runtime_init().unwrap_or(u64::MAX),
+            )),
+        );
+        if let Some(anchor) = probe_callee_save_dynamic_anchor(runtime) {
+            dynamic_valid = true;
+            dynamic.set_property(ctx, "valid", JSValue::bool(true));
+            dynamic.set_property(ctx, "source", JSValue::string(ctx, anchor.label));
+            dynamic.set_property(
+                ctx,
+                "runtimeOffset",
+                JSValue(ffi::JS_NewBigUint64(ctx, anchor.suspend_method_offset)),
+            );
+            dynamic.set_property(
+                ctx,
+                "candidateMethod",
+                JSValue(ffi::JS_NewBigUint64(ctx, anchor.method)),
+            );
+        } else {
+            dynamic.set_property(ctx, "valid", JSValue::bool(false));
+        }
+    } else {
+        dynamic.set_property(ctx, "valid", JSValue::bool(false));
+        dynamic.set_property(ctx, "runtime", JSValue(ffi::JS_NewBigUint64(ctx, 0)));
+        dynamic.set_property(ctx, "setBaseOffset", JSValue(ffi::JS_NewBigUint64(ctx, u64::MAX)));
+        dynamic.set_property(ctx, "initSequenceOffset", JSValue(ffi::JS_NewBigUint64(ctx, u64::MAX)));
+    }
+    obj.set_property(ctx, "calleeSaveDynamicAnchor", dynamic);
+
     let fallback = JSValue(ffi::JS_NewObject(ctx));
     let mut fallback_valid = false;
     if let Some(runtime) = resolve_art_runtime_instance() {
@@ -442,7 +910,7 @@ pub(super) unsafe extern "C" fn js_art_symbol_probe(
     obj.set_property(
         ctx,
         "quickCalleeSaveFrameSupported",
-        JSValue::bool(selected_addr != 0 || fallback_valid),
+        JSValue::bool(selected_addr != 0 || dynamic_valid || fallback_valid),
     );
     obj.0
 }
@@ -450,7 +918,7 @@ pub(super) unsafe extern "C" fn js_art_symbol_probe(
 unsafe fn resolve_art_runtime_instance() -> Option<*mut std::ffi::c_void> {
     let instance_ptr = crate::jsapi::module::libart_dlsym("_ZN3art7Runtime9instance_E");
     if !instance_ptr.is_null() {
-        let raw = std::ptr::read_volatile(instance_ptr as *const u64) & 0x00ff_ffff_ffff_ffff;
+        let raw = std::ptr::read_volatile(instance_ptr as *const u64) & super::PAC_STRIP_MASK;
         if raw != 0 {
             return Some(raw as *mut std::ffi::c_void);
         }
